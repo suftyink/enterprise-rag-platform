@@ -4,6 +4,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from hashlib import sha256
+from math import isfinite
 from time import perf_counter
 from uuid import UUID, uuid4
 
@@ -178,6 +179,7 @@ class KnowledgeRetriever:
                 ranked_document.index < 0
                 or ranked_document.index >= len(candidates)
                 or ranked_document.index in seen_indexes
+                or not isfinite(ranked_document.score)
             ):
                 raise RagDependencyError("RERANK_INVALID_RESPONSE", "候选结果重排响应无效")
             seen_indexes.add(ranked_document.index)

@@ -15,4 +15,4 @@
 
 ## Answer
 
-Added the typed Retriever Seam and composition dependency, moved search orchestration behind it, and preserved the public search response. The Retriever test suite now exercises the successful path, including the production Milvus hybrid-search adapter, through `retrieve()`.
+Added the typed Retriever Seam and composition dependency, moved search orchestration behind it, and preserved the public search response. The Retriever test suite now exercises the successful path through `retrieve()`, including one Dense request, one BM25 request and the configured RRF ranker in the production Milvus adapter.

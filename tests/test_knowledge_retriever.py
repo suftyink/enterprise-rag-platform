@@ -324,6 +324,37 @@ async def test_retrieve_rejects_incomplete_rerank_responses(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("score", [float("nan"), float("inf"), float("-inf")])
+async def test_retrieve_rejects_non_finite_rerank_scores(
+    session_factory: async_sessionmaker[AsyncSession],
+    score: float,
+) -> None:
+    document = _ready_document("TENANT", "tenant-a", "inventory-policy")
+    chunk = _chunk(document, "inventory policy evidence")
+    async with session_factory() as session:
+        session.add_all([document, chunk])
+        await session.commit()
+        retriever = KnowledgeRetriever(
+            session=session,
+            vector_store=RecordingVectorStore(
+                hits=[VectorHit(chunk_id=chunk.id, score=0.9)]
+            ),
+            embedding=FakeEmbeddingProvider(),
+            reranker=InvalidScoreReranker(score),
+            settings=Settings(rag_enabled=True),
+        )
+        with pytest.raises(RagDependencyError) as raised:
+            await retriever.retrieve(
+                RetrievalRequest(
+                    query="inventory policy",
+                    actor=ActorContext(subject_id="user-a", tenant_id="tenant-a"),
+                )
+            )
+
+    assert raised.value.code == "RERANK_INVALID_RESPONSE"
+
+
+@pytest.mark.asyncio
 async def test_retrieve_orders_tied_evidence_independently_of_vector_hit_order(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -408,7 +439,8 @@ async def test_retrieve_uses_dense_and_bm25_rrf_through_the_milvus_adapter(
 
     assert outcome.decision is SearchDecision.MATCHED
     assert [evidence.document_key for evidence in outcome.evidence] == ["hybrid-policy"]
-    assert client.hybrid_request_count == 2
+    assert client.anns_fields == ["dense_vector", "sparse_vector"]
+    assert client.ranker == {"strategy": "rrf", "params": {"k": 60}}
 
 
 @pytest.mark.asyncio
@@ -480,6 +512,17 @@ class IncompleteReranker:
         return [RankedDocument(index=0, score=0.5)]
 
 
+class InvalidScoreReranker:
+    model = "invalid-score-reranker"
+
+    def __init__(self, score: float) -> None:
+        self.score = score
+
+    async def rerank(self, query: str, documents: list[str]) -> list[RankedDocument]:
+        del query, documents
+        return [RankedDocument(index=0, score=self.score)]
+
+
 class TieReranker:
     model = "tie-reranker"
 
@@ -494,7 +537,8 @@ class TieReranker:
 class RecordingMilvusClient:
     def __init__(self, chunk_id: UUID) -> None:
         self.chunk_id = chunk_id
-        self.hybrid_request_count = 0
+        self.anns_fields: list[str] = []
+        self.ranker: dict[str, object] = {}
 
     def has_collection(self, collection: str) -> bool:
         del collection
@@ -509,8 +553,9 @@ class RecordingMilvusClient:
         limit: int,
         output_fields: list[str],
     ) -> list[list[dict[str, object]]]:
-        del collection, ranker, limit, output_fields
-        self.hybrid_request_count = len(reqs)
+        del collection, limit, output_fields
+        self.anns_fields = [request.anns_field for request in reqs]
+        self.ranker = ranker.dict()
         return [[{"id": str(self.chunk_id), "distance": 0.9}]]
 
     def close(self) -> None:

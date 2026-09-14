@@ -15,4 +15,4 @@
 
 ## Answer
 
-Centralized eligibility checks in the Retriever and added explicit error translation for Embedding, Milvus, PostgreSQL and Rerank boundaries. Invalid direct-domain requests and malformed or incomplete Rerank responses now fail explicitly rather than appearing as insufficient knowledge.
+Centralized eligibility checks in the Retriever and added explicit error translation for Embedding, Milvus, PostgreSQL and Rerank boundaries. Invalid direct-domain requests and malformed, incomplete or non-finite Rerank responses now fail explicitly rather than appearing as insufficient knowledge.
