@@ -156,3 +156,31 @@ async def test_run_counts_duplicate_chunks_for_one_source_once_in_ndcg(
     assert report.metrics.recall_at_5 == 1.0
     assert report.metrics.ndcg_at_5 == 1.0
 
+
+@pytest.mark.asyncio
+async def test_run_normalizes_forbidden_document_keys_before_leakage_gate(
+    tmp_path: Path,
+) -> None:
+    dataset = write_dataset(
+        tmp_path / "normalized-forbidden-key.jsonl",
+        [
+            evaluation_case(
+                "tenant-probe-1",
+                "tenant isolation probe",
+                expected_sources=[
+                    {"documentKey": "approved-sop", "pageStart": 1, "pageEnd": 1}
+                ],
+                expected_decision="MATCHED",
+                categories=["TENANT_ISOLATION"],
+                forbidden_document_keys=[" tenant-b-secret "],
+            )
+        ],
+    )
+
+    report = await RetrievalEvaluator(
+        DeterministicRetriever({"tenant isolation probe": outcome("tenant-b-secret")}),
+        environment(),
+    ).run(dataset)
+
+    assert report.metrics.tenant_leakage_count == 1
+    assert report.gate.decision == GateDecision.FAIL

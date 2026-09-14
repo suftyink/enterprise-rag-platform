@@ -182,4 +182,3 @@ async def test_run_rejects_mixed_retrieval_identity_as_execution_failure(
         ("identity-2", "RETRIEVAL_IDENTITY_MISMATCH")
     ]
     assert report.gate.decision == GateDecision.FAIL
-

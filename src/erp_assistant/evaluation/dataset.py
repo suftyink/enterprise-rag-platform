@@ -121,11 +121,13 @@ def _parse_case(value: Any, line_number: int) -> EvaluationCase:
     if (
         len(category_set) != len(categories)
         or any(not _is_bounded_text(key, 256) for key in forbidden_keys)
-        or len(forbidden_keys) != len(set(forbidden_keys))
     ):
         raise _invalid("Invalid evaluation labels", line_number)
 
-    forbidden_key_set = frozenset(forbidden_keys)
+    normalized_forbidden_keys = tuple(key.strip() for key in forbidden_keys)
+    if len(normalized_forbidden_keys) != len(set(normalized_forbidden_keys)):
+        raise _invalid("Invalid evaluation labels", line_number)
+    forbidden_key_set = frozenset(normalized_forbidden_keys)
     source_keys = {source.document_key for source in sources}
     if (
         (expected_decision == SearchDecision.MATCHED) != bool(sources)
