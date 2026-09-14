@@ -1,183 +1,210 @@
 import argparse
 import asyncio
 import json
-import math
-from dataclasses import dataclass
+from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 from time import perf_counter
-from typing import Any
 
 import httpx
 
+from erp_assistant.core.config import get_settings
+from erp_assistant.evaluation.dataset import load_dataset
+from erp_assistant.evaluation.http_adapter import HttpRetrievalAdapter
+from erp_assistant.evaluation.metrics import build_gate, calculate_metrics
+from erp_assistant.evaluation.models import (
+    EvaluationCategory,
+    EvaluationDatasetError,
+    EvaluationEnvironment,
+    EvaluationFailure,
+    EvaluationMetadata,
+    EvaluationReport,
+    GateDecision,
+    ObservedCase,
+    Retriever,
+)
+from erp_assistant.infrastructure.database import SessionFactory
+from erp_assistant.orchestration.provider_factory import (
+    get_embedding_provider,
+    get_rerank_provider,
+)
+from erp_assistant.rag.errors import RagDependencyError
+from erp_assistant.rag.retriever import KnowledgeRetriever, RetrievalRequest, RetrievalRun
+from erp_assistant.rag.vector_store import get_vector_store
 
-@dataclass(frozen=True)
-class RelevantSource:
-    document_key: str
-    page_start: int
-    page_end: int
+__all__ = [
+    "EvaluationDatasetError",
+    "EvaluationEnvironment",
+    "GateDecision",
+    "HttpRetrievalAdapter",
+    "RetrievalEvaluator",
+]
 
 
-@dataclass(frozen=True)
-class EvaluationCase:
-    case_id: str
-    tenant_id: str
-    operator_id: str
-    query: str
-    relevant_sources: list[RelevantSource]
-    should_refuse: bool
-    forbidden_document_keys: set[str]
+class RetrievalEvaluator:
+    def __init__(self, retriever: Retriever, environment: EvaluationEnvironment) -> None:
+        self._retriever = retriever
+        self._environment = environment
 
+    async def run(self, dataset_path: Path) -> EvaluationReport:
+        executed_at = datetime.now(UTC).isoformat()
+        started = perf_counter()
+        dataset = load_dataset(dataset_path)
+        observed: list[ObservedCase] = []
+        failures: list[EvaluationFailure] = []
+        run_identity: RetrievalRun | None = None
 
-@dataclass(frozen=True)
-class CaseResult:
-    case: EvaluationCase
-    decision: str
-    results: list[dict[str, Any]]
-    latency_ms: float
-
-
-def load_cases(path: Path) -> list[EvaluationCase]:
-    cases: list[EvaluationCase] = []
-    with path.open(encoding="utf-8") as stream:
-        for line_number, line in enumerate(stream, start=1):
-            if not line.strip():
-                continue
+        for case in dataset.cases:
             try:
-                value = json.loads(line)
-                sources = [
-                    RelevantSource(
-                        document_key=item["documentKey"],
-                        page_start=int(item["pageStart"]),
-                        page_end=int(item["pageEnd"]),
-                    )
-                    for item in value.get("relevantSources", [])
-                ]
-                cases.append(
-                    EvaluationCase(
-                        case_id=value["id"],
-                        tenant_id=value["tenantId"],
-                        operator_id=value.get("operatorId", "evaluation"),
-                        query=value["query"],
-                        relevant_sources=sources,
-                        should_refuse=bool(value.get("shouldRefuse", False)),
-                        forbidden_document_keys=set(value.get("forbiddenDocumentKeys", [])),
+                outcome = await self._retriever.retrieve(
+                    RetrievalRequest(
+                        query=case.question,
+                        actor=case.actor,
+                        evidence_limit=5,
                     )
                 )
-            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-                raise ValueError(f"Invalid evaluation case at line {line_number}") from exc
-    return cases
+            except RagDependencyError as exc:
+                failures.append(
+                    EvaluationFailure(
+                        case_id=case.case_id,
+                        code=exc.code,
+                        kind=(
+                            "DEPLOYMENT_EXECUTION"
+                            if exc.code.startswith("HTTP_")
+                            else "RETRIEVAL_DEPENDENCY"
+                        ),
+                    )
+                )
+                continue
+            if run_identity is not None and _identity(outcome.run) != _identity(run_identity):
+                failures.append(
+                    EvaluationFailure(
+                        case_id=case.case_id,
+                        code="RETRIEVAL_IDENTITY_MISMATCH",
+                        kind="RETRIEVAL_CONFIGURATION",
+                    )
+                )
+                continue
+            observed.append(ObservedCase(case=case, outcome=outcome))
+            if run_identity is None:
+                run_identity = outcome.run
+
+        metrics = calculate_metrics(observed, len(dataset.cases))
+        category_metrics = {
+            category.value: calculate_metrics(
+                [item for item in observed if category in item.case.categories],
+                sum(category in case.categories for case in dataset.cases),
+            )
+            for category in EvaluationCategory
+        }
+        gate = build_gate(metrics, dataset.cases, failures)
+        comparison_key = _comparison_key(
+            dataset_version=dataset.version,
+            dataset_hash=dataset.content_hash,
+            environment=self._environment,
+            run=run_identity,
+        )
+        return EvaluationReport(
+            metrics=metrics,
+            metadata=EvaluationMetadata(
+                dataset_version=dataset.version,
+                dataset_hash=dataset.content_hash,
+                index_identity=self._environment.index_identity,
+                parser_version=self._environment.parser_version,
+                chunk_version=self._environment.chunk_version,
+                retrieval_pipeline=run_identity.retrieval if run_identity else None,
+                embedding_model=run_identity.embedding_model if run_identity else None,
+                rerank_model=run_identity.rerank_model if run_identity else None,
+                configuration_fingerprint=(
+                    run_identity.config_fingerprint if run_identity else None
+                ),
+                comparison_key=comparison_key,
+                executed_at=executed_at,
+                elapsed_ms=round((perf_counter() - started) * 1000, 2),
+            ),
+            failures=tuple(failures),
+            category_metrics=category_metrics,
+            gate=gate,
+        )
 
 
-def _is_relevant(result: dict[str, Any], source: RelevantSource) -> bool:
-    return bool(
-        result.get("documentKey") == source.document_key
-        and int(result.get("pageStart", 0)) <= source.page_end
-        and int(result.get("pageEnd", 0)) >= source.page_start
+def _identity(run: RetrievalRun) -> tuple[str, str, str, float, str]:
+    return (
+        run.retrieval,
+        run.embedding_model,
+        run.rerank_model,
+        run.threshold,
+        run.config_fingerprint,
     )
 
 
-def _percentile(values: list[float], percentile: float) -> float:
-    if not values:
-        return 0.0
-    ordered = sorted(values)
-    index = max(0, math.ceil(percentile * len(ordered)) - 1)
-    return round(ordered[index], 2)
+def _comparison_key(
+    *,
+    dataset_version: str,
+    dataset_hash: str,
+    environment: EvaluationEnvironment,
+    run: RetrievalRun | None,
+) -> str:
+    payload = json.dumps(
+        {
+            "chunkVersion": environment.chunk_version,
+            "configurationFingerprint": run.config_fingerprint if run else None,
+            "datasetHash": dataset_hash,
+            "datasetVersion": dataset_version,
+            "embeddingModel": run.embedding_model if run else None,
+            "indexIdentity": environment.index_identity,
+            "parserVersion": environment.parser_version,
+            "rerankModel": run.rerank_model if run else None,
+            "retrievalPipeline": run.retrieval if run else None,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return sha256(payload).hexdigest()
 
 
-def calculate_metrics(case_results: list[CaseResult], top_k: int = 5) -> dict[str, float | int]:
-    expected_sources = 0
-    retrieved_sources = 0
-    reciprocal_ranks: list[float] = []
-    ndcg_scores: list[float] = []
-    refusal_total = 0
-    refusal_correct = 0
-    leakage_count = 0
-
-    for observed in case_results:
-        results = observed.results[:top_k]
-        if observed.case.should_refuse:
-            refusal_total += 1
-            refusal_correct += int(observed.decision == "INSUFFICIENT_KNOWLEDGE")
-        if observed.case.relevant_sources:
-            expected_sources += len(observed.case.relevant_sources)
-            retrieved_sources += sum(
-                any(_is_relevant(result, source) for result in results)
-                for source in observed.case.relevant_sources
+async def _run_from_cli(args: argparse.Namespace) -> EvaluationReport:
+    settings = get_settings()
+    environment = EvaluationEnvironment(
+        index_identity=args.index_identity or settings.milvus_collection,
+        parser_version=args.parser_version,
+        chunk_version=(
+            args.chunk_version
+            or (
+                f"page-aware-v1:{settings.knowledge_chunk_target}:"
+                f"{settings.knowledge_chunk_max}:{settings.knowledge_chunk_overlap}"
             )
-            relevance = [
-                int(any(_is_relevant(result, source) for source in observed.case.relevant_sources))
-                for result in results
-            ]
-            first_rank = next((index for index, value in enumerate(relevance, 1) if value), None)
-            reciprocal_ranks.append(0.0 if first_rank is None else 1.0 / first_rank)
-            dcg = sum(value / math.log2(index + 1) for index, value in enumerate(relevance, 1))
-            ideal_count = min(len(observed.case.relevant_sources), top_k)
-            ideal_dcg = sum(1.0 / math.log2(index + 1) for index in range(1, ideal_count + 1))
-            ndcg_scores.append(0.0 if ideal_dcg == 0 else dcg / ideal_dcg)
-        leakage_count += sum(
-            result.get("documentKey") in observed.case.forbidden_document_keys
-            for result in results
+        ),
+    )
+    if args.base_url:
+        async with httpx.AsyncClient(base_url=args.base_url, timeout=30.0) as client:
+            return await RetrievalEvaluator(
+                HttpRetrievalAdapter(client), environment
+            ).run(args.dataset)
+    async with SessionFactory() as session:
+        retriever = KnowledgeRetriever(
+            session=session,
+            vector_store=get_vector_store(),
+            embedding=get_embedding_provider(),
+            reranker=get_rerank_provider(),
+            settings=settings,
         )
-
-    latencies = [item.latency_ms for item in case_results]
-    return {
-        "caseCount": len(case_results),
-        "recallAt5": round(retrieved_sources / expected_sources, 4)
-        if expected_sources
-        else 0.0,
-        "mrrAt5": round(sum(reciprocal_ranks) / len(reciprocal_ranks), 4)
-        if reciprocal_ranks
-        else 0.0,
-        "ndcgAt5": round(sum(ndcg_scores) / len(ndcg_scores), 4)
-        if ndcg_scores
-        else 0.0,
-        "refusalAccuracy": round(refusal_correct / refusal_total, 4)
-        if refusal_total
-        else 0.0,
-        "tenantLeakageCount": leakage_count,
-        "latencyP50Ms": _percentile(latencies, 0.50),
-        "latencyP95Ms": _percentile(latencies, 0.95),
-    }
-
-
-async def run_evaluation(
-    cases: list[EvaluationCase], base_url: str, top_k: int
-) -> list[CaseResult]:
-    observed: list[CaseResult] = []
-    async with httpx.AsyncClient(base_url=base_url, timeout=30.0) as client:
-        for case in cases:
-            started = perf_counter()
-            response = await client.post(
-                "/api/assistant/v1/knowledge/search",
-                json={
-                    "tenantId": case.tenant_id,
-                    "operatorId": case.operator_id,
-                    "query": case.query,
-                    "topK": top_k,
-                },
-            )
-            latency_ms = (perf_counter() - started) * 1000
-            response.raise_for_status()
-            payload = response.json()
-            observed.append(
-                CaseResult(
-                    case=case,
-                    decision=payload["decision"],
-                    results=payload["results"],
-                    latency_ms=latency_ms,
-                )
-            )
-    return observed
+        return await RetrievalEvaluator(retriever, environment).run(args.dataset)
 
 
 async def _main() -> None:
-    parser = argparse.ArgumentParser(description="Evaluate knowledge retrieval through HTTP API")
+    parser = argparse.ArgumentParser(description="Evaluate the retrieval quality baseline")
     parser.add_argument("--dataset", required=True, type=Path)
-    parser.add_argument("--base-url", default="http://127.0.0.1:8000")
-    parser.add_argument("--top-k", type=int, default=5, choices=range(1, 21))
+    parser.add_argument("--report", type=Path)
+    parser.add_argument("--base-url")
+    parser.add_argument("--index-identity")
+    parser.add_argument("--parser-version", default="pdf-parser-v1")
+    parser.add_argument("--chunk-version")
     args = parser.parse_args()
-    results = await run_evaluation(load_cases(args.dataset), args.base_url, args.top_k)
-    print(json.dumps(calculate_metrics(results, args.top_k), ensure_ascii=False, indent=2))
+    report = await _run_from_cli(args)
+    if args.report:
+        report.write(args.report)
+    print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
 
 
 def main() -> None:

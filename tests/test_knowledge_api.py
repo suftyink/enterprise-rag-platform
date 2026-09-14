@@ -237,12 +237,16 @@ async def test_search_filters_other_tenant_and_includes_global(
         "global-doc",
     ]
     assert response.json()["decision"] == "MATCHED"
-    assert response.json()["pipeline"] == {
+    pipeline = response.json()["pipeline"]
+    config_fingerprint = pipeline.pop("configFingerprint")
+    assert pipeline == {
         "retrieval": "dense-bm25-rrf-v1",
         "embeddingModel": "fake-lexical-v1",
         "rerankModel": "fake-lexical-rerank-v2",
         "threshold": 0.1,
     }
+    assert len(config_fingerprint) == 64
+    assert response.json()["elapsedMs"] >= 0
     assert response.json()["results"][0]["retrievalRank"] == 2
     assert 0 <= response.json()["results"][0]["score"] <= 1
     assert all(item["pageStart"] == 1 for item in response.json()["results"])

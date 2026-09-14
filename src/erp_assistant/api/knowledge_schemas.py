@@ -57,6 +57,7 @@ class KnowledgeSearchPipeline(BaseModel):
     embedding_model: str = Field(alias="embeddingModel")
     rerank_model: str = Field(alias="rerankModel")
     threshold: float
+    config_fingerprint: str = Field(alias="configFingerprint")
 
 
 class KnowledgeSearchResponse(BaseModel):
@@ -65,5 +66,6 @@ class KnowledgeSearchResponse(BaseModel):
     trace_id: UUID = Field(alias="traceId")
     query: str
     decision: SearchDecision
+    elapsed_ms: float = Field(alias="elapsedMs")
     pipeline: KnowledgeSearchPipeline
     results: list[KnowledgeSearchResult]

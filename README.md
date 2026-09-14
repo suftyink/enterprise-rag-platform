@@ -157,14 +157,26 @@ Invoke-RestMethod `
 uv run python -m erp_assistant.rag.reindex
 ```
 
-API 和 RAG 基础设施运行后，可通过 JSONL 数据集执行离线检索评测：
+RAG 基础设施运行后，默认通过进程内 `KnowledgeRetriever` 执行版本化 JSONL 检索评测，并持久化机器可读报告：
 
 ```powershell
 uv run python -m erp_assistant.evaluation.retrieval `
   --dataset tests/fixtures/retrieval_eval.example.jsonl `
-  --base-url http://127.0.0.1:8000 `
-  --top-k 5
+  --report retrieval-evaluation-report.json `
+  --index-identity knowledge_chunks_hybrid_v1:local
 ```
+
+部署后端到端验收时，显式增加 HTTP Adapter：
+
+```powershell
+uv run python -m erp_assistant.evaluation.retrieval `
+  --dataset tests/fixtures/retrieval_eval.example.jsonl `
+  --report retrieval-evaluation-report.json `
+  --index-identity knowledge_chunks_hybrid_v1:staging `
+  --base-url http://127.0.0.1:8000
+```
+
+仓库内示例集是合成契约夹具，只能验证评测框架；生产基线必须包含至少 100 条由业务方人工复核、覆盖全部必需分类的真实案例。
 
 当前限制为单文件 20MB、最多 200 页，仅支持可复制文字的 PDF。扫描件会进入 `OCR_REQUIRED`，不会生成错误索引。Fake Embedding 只用于验证流程和基础词项检索，不能代表真实语义准确率。
 
@@ -197,7 +209,7 @@ docker compose --profile rag config --quiet
 - Fake Embedding 已升级为确定性的 256 维词项及中文字符特征向量 `fake-lexical-v1`。
 - 检索已升级为 Dense + BM25、RRF、Rerank 和低置信度门禁，并提供可重建的新版本 Collection。
 - 检索响应包含 `traceId`、检索管线版本、最终归一化分数和 `MATCHED`/`INSUFFICIENT_KNOWLEDGE` 决策。
-- 已建立 Recall@5、MRR@5、nDCG@5、拒答准确率、租户泄漏和延迟评测工具。
+- 已建立版本化检索评测框架、分类指标、可复现报告和机器可判定质量门禁；真实业务基线仍待业务方复核批准。
 - Ruff、Mypy、Pytest 和依赖兼容性检查已经通过。
 
 OCR、复杂表格、真实 Embedding/Rerank、引用回答、业务连接器、前端和写操作仍属于后续范围。
@@ -206,7 +218,7 @@ OCR、复杂表格、真实 Embedding/Rerank、引用回答、业务连接器、
 
 后续阶段按以下顺序实施。每个阶段验收完成后再进入下一阶段；这里不预设固定工期，实际排期取决于团队人数以及外部系统接口的可用性。
 
-### 1. RAG MVP（进行中：检索质量门禁已完成）
+### 1. RAG MVP（进行中：检索评测框架已完成）
 
 **目标**
 

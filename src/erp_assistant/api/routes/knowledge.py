@@ -236,11 +236,13 @@ async def search_documents(
         traceId=outcome.run.trace_id,
         query=payload.query,
         decision=outcome.decision,
+        elapsedMs=outcome.run.elapsed_ms,
         pipeline=KnowledgeSearchPipeline(
             retrieval=outcome.run.retrieval,
             embeddingModel=outcome.run.embedding_model,
             rerankModel=outcome.run.rerank_model,
             threshold=outcome.run.threshold,
+            configFingerprint=outcome.run.config_fingerprint,
         ),
         results=[
             KnowledgeSearchResult(

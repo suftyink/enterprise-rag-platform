@@ -1,7 +1,7 @@
 # Spec 02：建立真实检索评测基线
 
 Type: spec
-Status: ready-for-agent
+Status: resolved
 Blocked by: rag-01-knowledge-retriever
 Primary test seam: `RetrievalEvaluator.run()`
 
@@ -57,3 +57,7 @@ Primary test seam: `RetrievalEvaluator.run()`
 ## Further Notes
 
 The implementation framework is agent-ready. Completion of the production gate additionally requires business owners to approve the corpus and relevance labels; the report must distinguish “framework complete” from “production baseline approved.”
+
+## Answer
+
+评测框架、分类指标、质量门禁、可复现报告和 HTTP 验收 Adapter 已完成。框架会把合成、未复核、分类不全或少于 100 条的评测标记为 `INDETERMINATE`；真实生产基线仍需业务方提供并批准语料与相关性标签。
