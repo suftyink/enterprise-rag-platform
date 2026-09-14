@@ -1,7 +1,7 @@
 # Spec 01：收敛 KnowledgeRetriever 检索模块
 
 Type: spec
-Status: ready-for-agent
+Status: resolved
 Blocked by: none
 Primary test seam: `KnowledgeRetriever.retrieve()`
 
@@ -56,3 +56,7 @@ Primary test seam: `KnowledgeRetriever.retrieve()`
 ## Further Notes
 
 This is the first implementation spec because every later answer, evaluation and quality decision depends on a single production retrieval path. The refactor must preserve current behavior before quality changes begin.
+
+## Answer
+
+Implemented `KnowledgeRetriever.retrieve()` as the single typed retrieval use case. FastAPI now maps HTTP requests and outcomes without assembling retrieval internals; tenant/global and active/READY eligibility, dependency errors, query normalization, deterministic ordering, invalid Rerank response handling and reproducible configuration identity are enforced behind the Seam. Retriever-focused tests and API compatibility tests pass.

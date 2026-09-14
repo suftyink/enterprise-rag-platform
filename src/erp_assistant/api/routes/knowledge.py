@@ -222,6 +222,8 @@ async def search_documents(
         )
     except RagDependencyError as exc:
         raise _error(status.HTTP_503_SERVICE_UNAVAILABLE, exc.code, exc.message) from exc
+    except RagError as exc:
+        raise _error(status.HTTP_422_UNPROCESSABLE_ENTITY, exc.code, exc.message) from exc
     logger.info(
         "knowledge_search trace_id=%s embedding=%s reranker=%s results=%d elapsed_ms=%.2f",
         outcome.run.trace_id,

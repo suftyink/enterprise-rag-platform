@@ -4,11 +4,15 @@
 
 **Blocked by:** 01 / 建立 KnowledgeRetriever 并贯通兼容搜索.
 
-**Status:** claimed
+**Status:** resolved
 
-- [ ] 租户查询只能返回该租户和允许共享的全局证据。
-- [ ] 非活动、非 READY 或数据库中不存在的向量候选不会进入最终结果。
-- [ ] 所有候选为空或低于门禁时返回 `INSUFFICIENT_KNOWLEDGE` 和空证据。
-- [ ] 数据库、向量索引、Embedding 和 Rerank 失败产生明确领域错误。
-- [ ] 未授权证据与不存在证据对调用者呈现相同的非泄漏行为。
-- [ ] 资格检查由 Retriever 内部完成，HTTP 调用方不能关闭或跳过。
+- [x] 租户查询只能返回该租户和允许共享的全局证据。
+- [x] 非活动、非 READY 或数据库中不存在的向量候选不会进入最终结果。
+- [x] 所有候选为空或低于门禁时返回 `INSUFFICIENT_KNOWLEDGE` 和空证据。
+- [x] 数据库、向量索引、Embedding 和 Rerank 失败产生明确领域错误。
+- [x] 未授权证据与不存在证据对调用者呈现相同的非泄漏行为。
+- [x] 资格检查由 Retriever 内部完成，HTTP 调用方不能关闭或跳过。
+
+## Answer
+
+Centralized eligibility checks in the Retriever and added explicit error translation for Embedding, Milvus, PostgreSQL and Rerank boundaries. Invalid direct-domain requests and malformed or incomplete Rerank responses now fail explicitly rather than appearing as insufficient knowledge.

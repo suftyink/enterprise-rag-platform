@@ -15,15 +15,16 @@ from erp_assistant.orchestration.fake_providers import (
     FakeRerankProvider,
 )
 from erp_assistant.orchestration.providers import RankedDocument
-from erp_assistant.rag.errors import RagDependencyError
+from erp_assistant.rag.errors import RagDependencyError, RagError
 from erp_assistant.rag.retriever import ActorContext, KnowledgeRetriever, RetrievalRequest
 from erp_assistant.rag.types import DocumentStatus, SearchDecision
-from erp_assistant.rag.vector_store import VectorHit
+from erp_assistant.rag.vector_store import MilvusVectorStore, VectorHit
 
 
 @dataclass
 class RecordingVectorStore:
     hits: list[VectorHit] = field(default_factory=list)
+    queries: list[str] = field(default_factory=list)
 
     def upsert_document(
         self,
@@ -47,7 +48,8 @@ class RecordingVectorStore:
         limit: int,
         rrf_k: int,
     ) -> list[VectorHit]:
-        del query, vector, tenant_id, rrf_k
+        del vector, tenant_id, rrf_k
+        self.queries.append(query)
         return self.hits[:limit]
 
 
@@ -126,6 +128,67 @@ async def test_retrieve_reports_database_failure_as_a_dependency_error() -> None
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "retrieval_request",
+    [
+        RetrievalRequest(
+            query="   ",
+            actor=ActorContext(subject_id="user-a", tenant_id="tenant-a"),
+        ),
+        RetrievalRequest(
+            query="inventory",
+            actor=ActorContext(subject_id="user-a", tenant_id=""),
+        ),
+        RetrievalRequest(
+            query="inventory",
+            actor=ActorContext(subject_id="", tenant_id="tenant-a"),
+        ),
+        RetrievalRequest(
+            query="inventory",
+            actor=ActorContext(subject_id="user-a", tenant_id="tenant-a"),
+            evidence_limit=0,
+        ),
+        RetrievalRequest(
+            query="inventory",
+            actor=ActorContext(subject_id="user-a", tenant_id="tenant-a"),
+            evidence_limit=21,
+        ),
+    ],
+)
+async def test_retrieve_rejects_invalid_domain_requests(
+    retrieval_request: RetrievalRequest,
+) -> None:
+    retriever = KnowledgeRetriever(
+        session=FailingSession(),  # type: ignore[arg-type]
+        vector_store=FailingVectorStore(),
+        embedding=FailingEmbeddingProvider(),
+        reranker=FailingRerankProvider(),
+        settings=Settings(rag_enabled=True),
+    )
+
+    with pytest.raises(RagError) as raised:
+        await retriever.retrieve(retrieval_request)
+
+    assert raised.value.code == "INVALID_RETRIEVAL_REQUEST"
+
+
+@pytest.mark.asyncio
+async def test_retrieve_normalizes_query_before_all_retrieval_dependencies(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    vector_store = RecordingVectorStore()
+    async with session_factory() as session:
+        await _retriever(session, vector_store).retrieve(
+            RetrievalRequest(
+                query="  ＩＮＶＥＮＴＯＲＹ\t Policy \n",
+                actor=ActorContext(subject_id="user-a", tenant_id="tenant-a"),
+            )
+        )
+
+    assert vector_store.queries == ["inventory policy"]
+
+
+@pytest.mark.asyncio
 async def test_retrieve_returns_only_ready_active_permitted_evidence(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -151,10 +214,10 @@ async def test_retrieve_returns_only_ready_active_permitted_evidence(
             )
         )
 
-    assert [evidence.document_key for evidence in outcome.evidence] == [
+    assert {evidence.document_key for evidence in outcome.evidence} == {
         "tenant-policy",
         "global-policy",
-    ]
+    }
 
 
 @pytest.mark.asyncio
@@ -226,7 +289,7 @@ async def test_retrieve_reports_boundary_dependency_failures(
 
 
 @pytest.mark.asyncio
-async def test_retrieve_orders_tied_evidence_by_original_retrieval_rank(
+async def test_retrieve_rejects_incomplete_rerank_responses(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     first_document = _ready_document("TENANT", "tenant-a", "first-policy")
@@ -246,20 +309,106 @@ async def test_retrieve_orders_tied_evidence_by_original_retrieval_rank(
             session=session,
             vector_store=vector_store,
             embedding=FakeEmbeddingProvider(),
-            reranker=ReverseTieReranker(),
+            reranker=IncompleteReranker(),
             settings=Settings(rag_enabled=True),
         )
-        outcome = await retriever.retrieve(
+        with pytest.raises(RagDependencyError) as raised:
+            await retriever.retrieve(
+                RetrievalRequest(
+                    query="inventory policy",
+                    actor=ActorContext(subject_id="user-a", tenant_id="tenant-a"),
+                )
+            )
+
+    assert raised.value.code == "RERANK_INVALID_RESPONSE"
+
+
+@pytest.mark.asyncio
+async def test_retrieve_orders_tied_evidence_independently_of_vector_hit_order(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    first_document = _ready_document("TENANT", "tenant-a", "first-policy")
+    second_document = _ready_document("TENANT", "tenant-a", "second-policy")
+    first_chunk = _chunk(
+        first_document,
+        "inventory policy first",
+        chunk_id=UUID("00000000-0000-0000-0000-000000000001"),
+    )
+    second_chunk = _chunk(
+        second_document,
+        "inventory policy second",
+        chunk_id=UUID("00000000-0000-0000-0000-000000000002"),
+    )
+    async with session_factory() as session:
+        session.add_all([first_document, second_document, first_chunk, second_chunk])
+        await session.commit()
+        first_outcome = await KnowledgeRetriever(
+            session=session,
+            vector_store=RecordingVectorStore(
+                hits=[
+                    VectorHit(chunk_id=first_chunk.id, score=0.9),
+                    VectorHit(chunk_id=second_chunk.id, score=0.8),
+                ]
+            ),
+            embedding=FakeEmbeddingProvider(),
+            reranker=TieReranker(),
+            settings=Settings(rag_enabled=True),
+        ).retrieve(
+            RetrievalRequest(
+                query="inventory policy",
+                actor=ActorContext(subject_id="user-a", tenant_id="tenant-a"),
+            )
+        )
+        reversed_outcome = await KnowledgeRetriever(
+            session=session,
+            vector_store=RecordingVectorStore(
+                hits=[
+                    VectorHit(chunk_id=second_chunk.id, score=0.8),
+                    VectorHit(chunk_id=first_chunk.id, score=0.9),
+                ]
+            ),
+            embedding=FakeEmbeddingProvider(),
+            reranker=TieReranker(),
+            settings=Settings(rag_enabled=True),
+        ).retrieve(
             RetrievalRequest(
                 query="inventory policy",
                 actor=ActorContext(subject_id="user-a", tenant_id="tenant-a"),
             )
         )
 
-    assert [evidence.document_key for evidence in outcome.evidence] == [
-        "first-policy",
-        "second-policy",
-    ]
+    expected = [first_chunk.id, second_chunk.id]
+    assert [evidence.chunk_id for evidence in first_outcome.evidence] == expected
+    assert [evidence.chunk_id for evidence in reversed_outcome.evidence] == expected
+
+
+@pytest.mark.asyncio
+async def test_retrieve_uses_dense_and_bm25_rrf_through_the_milvus_adapter(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    document = _ready_document("TENANT", "tenant-a", "hybrid-policy")
+    chunk = _chunk(document, "inventory policy hybrid evidence")
+    client = RecordingMilvusClient(chunk.id)
+    vector_store = StubMilvusVectorStore(client)
+    async with session_factory() as session:
+        session.add_all([document, chunk])
+        await session.commit()
+        outcome = await KnowledgeRetriever(
+            session=session,
+            vector_store=vector_store,
+            embedding=FakeEmbeddingProvider(),
+            reranker=FakeRerankProvider(),
+            settings=Settings(rag_enabled=True),
+        ).retrieve(
+            RetrievalRequest(
+                query="inventory policy",
+                actor=ActorContext(subject_id="user-a", tenant_id="tenant-a"),
+            )
+        )
+
+    assert outcome.decision is SearchDecision.MATCHED
+    assert [evidence.document_key for evidence in outcome.evidence] == ["hybrid-policy"]
+    assert client.hybrid_request_count == 2
 
 
 @pytest.mark.asyncio
@@ -323,15 +472,58 @@ class FailingRerankProvider:
         raise RuntimeError("reranker unavailable")
 
 
-class ReverseTieReranker:
-    model = "reverse-tie-reranker"
+class IncompleteReranker:
+    model = "incomplete-reranker"
+
+    async def rerank(self, query: str, documents: list[str]) -> list[RankedDocument]:
+        del query, documents
+        return [RankedDocument(index=0, score=0.5)]
+
+
+class TieReranker:
+    model = "tie-reranker"
 
     async def rerank(self, query: str, documents: list[str]) -> list[RankedDocument]:
         del query
         return [
             RankedDocument(index=index, score=0.5)
-            for index in reversed(range(len(documents)))
+            for index in range(len(documents))
         ]
+
+
+class RecordingMilvusClient:
+    def __init__(self, chunk_id: UUID) -> None:
+        self.chunk_id = chunk_id
+        self.hybrid_request_count = 0
+
+    def has_collection(self, collection: str) -> bool:
+        del collection
+        return True
+
+    def hybrid_search(
+        self,
+        collection: str,
+        *,
+        reqs: list[object],
+        ranker: object,
+        limit: int,
+        output_fields: list[str],
+    ) -> list[list[dict[str, object]]]:
+        del collection, ranker, limit, output_fields
+        self.hybrid_request_count = len(reqs)
+        return [[{"id": str(self.chunk_id), "distance": 0.9}]]
+
+    def close(self) -> None:
+        pass
+
+
+class StubMilvusVectorStore(MilvusVectorStore):
+    def __init__(self, client: RecordingMilvusClient) -> None:
+        super().__init__("unused", "knowledge", FakeEmbeddingProvider.dimension)
+        self._stub_client = client
+
+    def _client(self) -> RecordingMilvusClient:  # type: ignore[override]
+        return self._stub_client
 
 
 def _retriever(
@@ -369,9 +561,14 @@ def _ready_document(scope: str, scope_id: str, key: str) -> KnowledgeDocument:
     )
 
 
-def _chunk(document: KnowledgeDocument, content: str) -> KnowledgeChunk:
+def _chunk(
+    document: KnowledgeDocument,
+    content: str,
+    *,
+    chunk_id: UUID | None = None,
+) -> KnowledgeChunk:
     return KnowledgeChunk(
-        id=uuid4(),
+        id=chunk_id or uuid4(),
         document_id=document.id,
         scope=document.scope,
         scope_id=document.scope_id,

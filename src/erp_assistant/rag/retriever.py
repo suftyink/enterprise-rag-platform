@@ -1,5 +1,7 @@
 import asyncio
 import json
+import re
+import unicodedata
 from dataclasses import dataclass
 from hashlib import sha256
 from time import perf_counter
@@ -11,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from erp_assistant.core.config import Settings
 from erp_assistant.models.knowledge import KnowledgeChunk, KnowledgeDocument
 from erp_assistant.orchestration.providers import EmbeddingProvider, RerankProvider
-from erp_assistant.rag.errors import RagDependencyError
+from erp_assistant.rag.errors import RagDependencyError, RagError
 from erp_assistant.rag.types import DocumentStatus, KnowledgeScope, SearchDecision
 from erp_assistant.rag.vector_store import VectorStore
 
@@ -80,6 +82,7 @@ class KnowledgeRetriever:
         self._settings = settings
 
     async def retrieve(self, request: RetrievalRequest) -> RetrievalOutcome:
+        request = self._normalize_request(request)
         trace_id = uuid4()
         started = perf_counter()
         evidence = await self._retrieve_evidence(request)
@@ -152,23 +155,23 @@ class KnowledgeRetriever:
             raise RagDependencyError("DATABASE_SEARCH_FAILED", "知识元数据查询失败") from exc
 
         by_id = {chunk.id: (chunk, document) for chunk, document in rows}
-        candidates: list[tuple[KnowledgeChunk, KnowledgeDocument, int]] = []
+        candidates: list[tuple[KnowledgeChunk, KnowledgeDocument, int, float]] = []
         for retrieval_rank, hit in enumerate(hits, start=1):
             row = by_id.get(hit.chunk_id)
             if row is not None:
-                candidates.append((*row, retrieval_rank))
+                candidates.append((*row, retrieval_rank, hit.score))
         if not candidates:
             return ()
 
         try:
             ranked = await self._reranker.rerank(
                 request.query,
-                [chunk.content for chunk, _, _ in candidates],
+                [chunk.content for chunk, _, _, _ in candidates],
             )
         except Exception as exc:
             raise RagDependencyError("RERANK_FAILED", "候选结果重排失败") from exc
 
-        evidence: list[RetrievalEvidence] = []
+        scored_evidence: list[tuple[RetrievalEvidence, float]] = []
         seen_indexes: set[int] = set()
         for ranked_document in ranked:
             if (
@@ -180,27 +183,56 @@ class KnowledgeRetriever:
             seen_indexes.add(ranked_document.index)
             if ranked_document.score < self._settings.rag_rerank_threshold:
                 continue
-            chunk, document, retrieval_rank = candidates[ranked_document.index]
-            evidence.append(
-                RetrievalEvidence(
-                    chunk_id=chunk.id,
-                    document_id=document.id,
-                    document_key=document.document_key,
-                    title=document.title,
-                    scope=KnowledgeScope(document.scope),
-                    document_version=document.version,
-                    page_start=chunk.page_start,
-                    page_end=chunk.page_end,
-                    section_title=chunk.section_title,
-                    content=chunk.content,
-                    score=ranked_document.score,
-                    retrieval_rank=retrieval_rank,
+            chunk, document, retrieval_rank, retrieval_score = candidates[
+                ranked_document.index
+            ]
+            scored_evidence.append(
+                (
+                    RetrievalEvidence(
+                        chunk_id=chunk.id,
+                        document_id=document.id,
+                        document_key=document.document_key,
+                        title=document.title,
+                        scope=KnowledgeScope(document.scope),
+                        document_version=document.version,
+                        page_start=chunk.page_start,
+                        page_end=chunk.page_end,
+                        section_title=chunk.section_title,
+                        content=chunk.content,
+                        score=ranked_document.score,
+                        retrieval_rank=retrieval_rank,
+                    ),
+                    retrieval_score,
                 )
             )
-        evidence.sort(
-            key=lambda item: (-item.score, item.retrieval_rank, str(item.chunk_id))
+        if len(seen_indexes) != len(candidates):
+            raise RagDependencyError("RERANK_INVALID_RESPONSE", "候选结果重排响应无效")
+        scored_evidence.sort(
+            key=lambda item: (-item[0].score, -item[1], str(item[0].chunk_id))
         )
-        return tuple(evidence[: request.evidence_limit])
+        return tuple(item[0] for item in scored_evidence[: request.evidence_limit])
+
+    @staticmethod
+    def _normalize_request(request: RetrievalRequest) -> RetrievalRequest:
+        query = unicodedata.normalize("NFKC", request.query)
+        query = re.sub(r"\s+", " ", query).strip().casefold()
+        subject_id = request.actor.subject_id.strip()
+        tenant_id = request.actor.tenant_id.strip()
+        if (
+            not query
+            or len(query) > 2_000
+            or not subject_id
+            or len(subject_id) > 64
+            or not tenant_id
+            or len(tenant_id) > 64
+            or not 1 <= request.evidence_limit <= 20
+        ):
+            raise RagError("INVALID_RETRIEVAL_REQUEST", "检索请求无效")
+        return RetrievalRequest(
+            query=query,
+            actor=ActorContext(subject_id=subject_id, tenant_id=tenant_id),
+            evidence_limit=request.evidence_limit,
+        )
 
     def _config_fingerprint(self) -> str:
         payload = json.dumps(

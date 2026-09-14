@@ -4,11 +4,15 @@
 
 **Blocked by:** 02 / 在 Retriever 内强制证据资格与错误语义.
 
-**Status:** claimed
+**Status:** resolved
 
-- [ ] 相同输入和版本下的最终排序可重复，同分候选有确定性次序。
-- [ ] 每次运行包含 trace ID、管线版本、模型身份、配置指纹和耗时。
-- [ ] 运行信息不包含完整查询、Chunk 正文或敏感凭据。
-- [ ] API 响应继续只暴露约定的公开管线信息。
-- [ ] 旧检索服务入口不再被 API 或后续模块直接调用。
-- [ ] Retriever 契约测试覆盖稳定排序和运行元数据。
+- [x] 相同输入和版本下的最终排序可重复，同分候选有确定性次序。
+- [x] 每次运行包含 trace ID、管线版本、模型身份、配置指纹和耗时。
+- [x] 运行信息不包含完整查询、Chunk 正文或敏感凭据。
+- [x] API 响应继续只暴露约定的公开管线信息。
+- [x] 旧检索服务入口不再被 API 或后续模块直接调用。
+- [x] Retriever 契约测试覆盖稳定排序和运行元数据。
+
+## Answer
+
+Added deterministic ordering using Rerank score, fused retrieval score and chunk identity; added pipeline/model/configuration run metadata with a stable SHA-256 fingerprint; and removed the old public search service function. Tests prove ordering is independent of equal-score hit order.
