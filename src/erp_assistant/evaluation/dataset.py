@@ -130,13 +130,14 @@ def _parse_case(value: Any, line_number: int) -> EvaluationCase:
     if (
         (expected_decision == SearchDecision.MATCHED) != bool(sources)
         or bool(source_keys.intersection(forbidden_key_set))
+        or _has_overlapping_sources(sources)
         or (
-            EvaluationCategory.NO_ANSWER in category_set
-            and expected_decision != SearchDecision.INSUFFICIENT_KNOWLEDGE
+            (EvaluationCategory.NO_ANSWER in category_set)
+            != (expected_decision == SearchDecision.INSUFFICIENT_KNOWLEDGE)
         )
         or (
-            EvaluationCategory.TENANT_ISOLATION in category_set
-            and not forbidden_key_set
+            (EvaluationCategory.TENANT_ISOLATION in category_set)
+            != bool(forbidden_key_set)
         )
     ):
         raise _invalid("Inconsistent evaluation labels", line_number)
@@ -173,6 +174,16 @@ def _parse_source(value: Any, line_number: int) -> RelevantSource:
 
 def _is_bounded_text(value: Any, maximum: int) -> bool:
     return type(value) is str and bool(value.strip()) and len(value.strip()) <= maximum
+
+
+def _has_overlapping_sources(sources: tuple[RelevantSource, ...]) -> bool:
+    return any(
+        left.document_key == right.document_key
+        and left.page_start <= right.page_end
+        and right.page_start <= left.page_end
+        for index, left in enumerate(sources)
+        for right in sources[index + 1 :]
+    )
 
 
 def _invalid(message: str, line_number: int) -> EvaluationDatasetError:

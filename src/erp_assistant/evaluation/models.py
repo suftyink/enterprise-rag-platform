@@ -33,6 +33,12 @@ class GateDecision(StrEnum):
     INDETERMINATE = "INDETERMINATE"
 
 
+class EvaluationFailureKind(StrEnum):
+    DEPLOYMENT_EXECUTION = "DEPLOYMENT_EXECUTION"
+    RETRIEVAL_DEPENDENCY = "RETRIEVAL_DEPENDENCY"
+    RETRIEVAL_CONFIGURATION = "RETRIEVAL_CONFIGURATION"
+
+
 @dataclass(frozen=True)
 class RelevantSource:
     document_key: str
@@ -111,7 +117,7 @@ class EvaluationMetadata:
 class EvaluationFailure:
     case_id: str
     code: str
-    kind: str
+    kind: EvaluationFailureKind
 
 
 @dataclass(frozen=True)

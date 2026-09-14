@@ -17,6 +17,7 @@ from erp_assistant.evaluation.models import (
     EvaluationDatasetError,
     EvaluationEnvironment,
     EvaluationFailure,
+    EvaluationFailureKind,
     EvaluationMetadata,
     EvaluationReport,
     GateDecision,
@@ -69,9 +70,9 @@ class RetrievalEvaluator:
                         case_id=case.case_id,
                         code=exc.code,
                         kind=(
-                            "DEPLOYMENT_EXECUTION"
+                            EvaluationFailureKind.DEPLOYMENT_EXECUTION
                             if exc.code.startswith("HTTP_")
-                            else "RETRIEVAL_DEPENDENCY"
+                            else EvaluationFailureKind.RETRIEVAL_DEPENDENCY
                         ),
                     )
                 )
@@ -81,7 +82,7 @@ class RetrievalEvaluator:
                     EvaluationFailure(
                         case_id=case.case_id,
                         code="RETRIEVAL_IDENTITY_MISMATCH",
-                        kind="RETRIEVAL_CONFIGURATION",
+                        kind=EvaluationFailureKind.RETRIEVAL_CONFIGURATION,
                     )
                 )
                 continue
