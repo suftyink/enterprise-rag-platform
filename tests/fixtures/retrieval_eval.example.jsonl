@@ -1,0 +1,2 @@
+{"id":"inventory-001","tenantId":"tenant-1","operatorId":"user-1","query":"盘点数量不一致怎么处理","relevantSources":[{"documentKey":"inventory-sop","pageStart":3,"pageEnd":4}],"shouldRefuse":false,"forbiddenDocumentKeys":[]}
+{"id":"unknown-001","tenantId":"tenant-1","operatorId":"user-1","query":"知识库中不存在的测试问题","relevantSources":[],"shouldRefuse":true,"forbiddenDocumentKeys":["tenant-2-secret"]}

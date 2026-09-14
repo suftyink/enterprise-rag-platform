@@ -1,0 +1,386 @@
+from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
+from uuid import UUID, uuid4
+
+import pytest
+import pytest_asyncio
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import StaticPool
+
+from erp_assistant.core.config import Settings
+from erp_assistant.infrastructure.database import Base
+from erp_assistant.models.knowledge import KnowledgeChunk, KnowledgeDocument
+from erp_assistant.orchestration.fake_providers import (
+    FakeEmbeddingProvider,
+    FakeRerankProvider,
+)
+from erp_assistant.orchestration.providers import RankedDocument
+from erp_assistant.rag.errors import RagDependencyError
+from erp_assistant.rag.retriever import ActorContext, KnowledgeRetriever, RetrievalRequest
+from erp_assistant.rag.types import DocumentStatus, SearchDecision
+from erp_assistant.rag.vector_store import VectorHit
+
+
+@dataclass
+class RecordingVectorStore:
+    hits: list[VectorHit] = field(default_factory=list)
+
+    def upsert_document(
+        self,
+        document_id: UUID,
+        scope: str,
+        scope_id: str,
+        version: int,
+        chunks: list[object],
+        vectors: list[list[float]],
+    ) -> None:
+        del document_id, scope, scope_id, version, chunks, vectors
+
+    def delete_document(self, document_id: UUID) -> None:
+        del document_id
+
+    def search(
+        self,
+        query: str,
+        vector: list[float],
+        tenant_id: str,
+        limit: int,
+        rrf_k: int,
+    ) -> list[VectorHit]:
+        del query, vector, tenant_id, rrf_k
+        return self.hits[:limit]
+
+
+@pytest_asyncio.fixture
+async def session_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    engine = create_async_engine(
+        "sqlite+aiosqlite://",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        yield factory
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_retrieve_returns_typed_evidence_for_a_permitted_document(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    document = _ready_document("TENANT", "tenant-a", "inventory-policy")
+    chunk = _chunk(document, "Inventory policy keeps safety stock available.")
+    vector_store = RecordingVectorStore(hits=[VectorHit(chunk_id=chunk.id, score=0.9)])
+    async with session_factory() as session:
+        session.add_all([document, chunk])
+        await session.commit()
+        retriever = KnowledgeRetriever(
+            session=session,
+            vector_store=vector_store,
+            embedding=FakeEmbeddingProvider(),
+            reranker=FakeRerankProvider(),
+            settings=Settings(rag_enabled=True),
+        )
+
+        outcome = await retriever.retrieve(
+            RetrievalRequest(
+                query="inventory policy",
+                actor=ActorContext(subject_id="user-a", tenant_id="tenant-a"),
+                evidence_limit=5,
+            )
+        )
+
+    assert outcome.decision is SearchDecision.MATCHED
+    assert len(outcome.evidence) == 1
+    assert outcome.evidence[0].document_key == "inventory-policy"
+    assert outcome.evidence[0].content == "Inventory policy keeps safety stock available."
+    assert outcome.evidence[0].retrieval_rank == 1
+    assert outcome.run.retrieval == "dense-bm25-rrf-v1"
+    assert outcome.run.embedding_model == "fake-lexical-v1"
+    assert outcome.run.rerank_model == "fake-lexical-rerank-v2"
+
+
+@pytest.mark.asyncio
+async def test_retrieve_reports_database_failure_as_a_dependency_error() -> None:
+    vector_store = RecordingVectorStore(hits=[VectorHit(chunk_id=uuid4(), score=0.9)])
+    retriever = KnowledgeRetriever(
+        session=FailingSession(),  # type: ignore[arg-type]
+        vector_store=vector_store,
+        embedding=FakeEmbeddingProvider(),
+        reranker=FakeRerankProvider(),
+        settings=Settings(rag_enabled=True),
+    )
+
+    with pytest.raises(RagDependencyError) as raised:
+        await retriever.retrieve(
+            RetrievalRequest(
+                query="inventory policy",
+                actor=ActorContext(subject_id="user-a", tenant_id="tenant-a"),
+            )
+        )
+
+    assert raised.value.code == "DATABASE_SEARCH_FAILED"
+
+
+@pytest.mark.asyncio
+async def test_retrieve_returns_only_ready_active_permitted_evidence(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    permitted = _ready_document("TENANT", "tenant-a", "tenant-policy")
+    global_document = _ready_document("GLOBAL", "GLOBAL", "global-policy")
+    other_tenant = _ready_document("TENANT", "tenant-b", "other-policy")
+    inactive = _ready_document("TENANT", "tenant-a", "inactive-policy")
+    inactive.active = False
+    failed = _ready_document("TENANT", "tenant-a", "failed-policy")
+    failed.status = DocumentStatus.FAILED.value
+    documents = [permitted, global_document, other_tenant, inactive, failed]
+    chunks = [_chunk(document, "inventory policy evidence") for document in documents]
+    vector_store = RecordingVectorStore(
+        hits=[VectorHit(chunk_id=chunk.id, score=0.9) for chunk in chunks]
+    )
+    async with session_factory() as session:
+        session.add_all([*documents, *chunks])
+        await session.commit()
+        outcome = await _retriever(session, vector_store).retrieve(
+            RetrievalRequest(
+                query="inventory policy",
+                actor=ActorContext(subject_id="user-a", tenant_id="tenant-a"),
+            )
+        )
+
+    assert [evidence.document_key for evidence in outcome.evidence] == [
+        "tenant-policy",
+        "global-policy",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_returns_insufficient_knowledge_below_threshold(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    document = _ready_document("TENANT", "tenant-a", "inventory-policy")
+    chunk = _chunk(document, "inventory policy evidence")
+    vector_store = RecordingVectorStore(hits=[VectorHit(chunk_id=chunk.id, score=0.9)])
+    async with session_factory() as session:
+        session.add_all([document, chunk])
+        await session.commit()
+        outcome = await _retriever(session, vector_store).retrieve(
+            RetrievalRequest(
+                query="unrelated question",
+                actor=ActorContext(subject_id="user-a", tenant_id="tenant-a"),
+            )
+        )
+
+    assert outcome.decision is SearchDecision.INSUFFICIENT_KNOWLEDGE
+    assert outcome.evidence == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failing_dependency", "expected_code"),
+    [
+        ("embedding", "EMBEDDING_FAILED"),
+        ("vector_store", "MILVUS_SEARCH_FAILED"),
+        ("reranker", "RERANK_FAILED"),
+    ],
+)
+async def test_retrieve_reports_boundary_dependency_failures(
+    session_factory: async_sessionmaker[AsyncSession],
+    failing_dependency: str,
+    expected_code: str,
+) -> None:
+    document = _ready_document("TENANT", "tenant-a", "inventory-policy")
+    chunk = _chunk(document, "inventory policy evidence")
+    vector_store = RecordingVectorStore(hits=[VectorHit(chunk_id=chunk.id, score=0.9)])
+    embedding = FakeEmbeddingProvider()
+    reranker = FakeRerankProvider()
+    if failing_dependency == "embedding":
+        embedding = FailingEmbeddingProvider()  # type: ignore[assignment]
+    elif failing_dependency == "vector_store":
+        vector_store = FailingVectorStore()
+    else:
+        reranker = FailingRerankProvider()  # type: ignore[assignment]
+
+    async with session_factory() as session:
+        session.add_all([document, chunk])
+        await session.commit()
+        retriever = KnowledgeRetriever(
+            session=session,
+            vector_store=vector_store,
+            embedding=embedding,
+            reranker=reranker,
+            settings=Settings(rag_enabled=True),
+        )
+        with pytest.raises(RagDependencyError) as raised:
+            await retriever.retrieve(
+                RetrievalRequest(
+                    query="inventory policy",
+                    actor=ActorContext(subject_id="user-a", tenant_id="tenant-a"),
+                )
+            )
+
+    assert raised.value.code == expected_code
+
+
+@pytest.mark.asyncio
+async def test_retrieve_orders_tied_evidence_by_original_retrieval_rank(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    first_document = _ready_document("TENANT", "tenant-a", "first-policy")
+    second_document = _ready_document("TENANT", "tenant-a", "second-policy")
+    first_chunk = _chunk(first_document, "inventory policy first")
+    second_chunk = _chunk(second_document, "inventory policy second")
+    vector_store = RecordingVectorStore(
+        hits=[
+            VectorHit(chunk_id=first_chunk.id, score=0.9),
+            VectorHit(chunk_id=second_chunk.id, score=0.8),
+        ]
+    )
+    async with session_factory() as session:
+        session.add_all([first_document, second_document, first_chunk, second_chunk])
+        await session.commit()
+        retriever = KnowledgeRetriever(
+            session=session,
+            vector_store=vector_store,
+            embedding=FakeEmbeddingProvider(),
+            reranker=ReverseTieReranker(),
+            settings=Settings(rag_enabled=True),
+        )
+        outcome = await retriever.retrieve(
+            RetrievalRequest(
+                query="inventory policy",
+                actor=ActorContext(subject_id="user-a", tenant_id="tenant-a"),
+            )
+        )
+
+    assert [evidence.document_key for evidence in outcome.evidence] == [
+        "first-policy",
+        "second-policy",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_fingerprints_the_effective_retrieval_configuration(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    vector_store = RecordingVectorStore()
+    request = RetrievalRequest(
+        query="inventory policy",
+        actor=ActorContext(subject_id="user-a", tenant_id="tenant-a"),
+    )
+    async with session_factory() as session:
+        first = await _retriever(session, vector_store).retrieve(request)
+        repeated = await _retriever(session, vector_store).retrieve(request)
+        changed = await KnowledgeRetriever(
+            session=session,
+            vector_store=vector_store,
+            embedding=FakeEmbeddingProvider(),
+            reranker=FakeRerankProvider(),
+            settings=Settings(rag_enabled=True, rag_rerank_threshold=0.25),
+        ).retrieve(request)
+
+    assert len(first.run.config_fingerprint) == 64
+    assert repeated.run.config_fingerprint == first.run.config_fingerprint
+    assert changed.run.config_fingerprint != first.run.config_fingerprint
+
+
+class FailingSession:
+    async def execute(self, statement: object) -> None:
+        del statement
+        raise RuntimeError("database unavailable")
+
+
+class FailingEmbeddingProvider:
+    model = "failing-embedding"
+    dimension = 1
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        del texts
+        raise RuntimeError("embedding unavailable")
+
+
+class FailingVectorStore(RecordingVectorStore):
+    def search(
+        self,
+        query: str,
+        vector: list[float],
+        tenant_id: str,
+        limit: int,
+        rrf_k: int,
+    ) -> list[VectorHit]:
+        del query, vector, tenant_id, limit, rrf_k
+        raise RuntimeError("vector store unavailable")
+
+
+class FailingRerankProvider:
+    model = "failing-reranker"
+
+    async def rerank(self, query: str, documents: list[str]) -> list[object]:
+        del query, documents
+        raise RuntimeError("reranker unavailable")
+
+
+class ReverseTieReranker:
+    model = "reverse-tie-reranker"
+
+    async def rerank(self, query: str, documents: list[str]) -> list[RankedDocument]:
+        del query
+        return [
+            RankedDocument(index=index, score=0.5)
+            for index in reversed(range(len(documents)))
+        ]
+
+
+def _retriever(
+    session: AsyncSession,
+    vector_store: RecordingVectorStore,
+) -> KnowledgeRetriever:
+    return KnowledgeRetriever(
+        session=session,
+        vector_store=vector_store,
+        embedding=FakeEmbeddingProvider(),
+        reranker=FakeRerankProvider(),
+        settings=Settings(rag_enabled=True),
+    )
+
+
+def _ready_document(scope: str, scope_id: str, key: str) -> KnowledgeDocument:
+    document_id = uuid4()
+    return KnowledgeDocument(
+        id=document_id,
+        scope=scope,
+        scope_id=scope_id,
+        tenant_id="tenant-a" if scope == "GLOBAL" else scope_id,
+        document_key=key,
+        version=1,
+        title=key,
+        original_filename=f"{key}.pdf",
+        media_type="application/pdf",
+        size_bytes=100,
+        sha256=uuid4().hex + uuid4().hex,
+        object_key=f"knowledge/{document_id}/original.pdf",
+        page_count=1,
+        status=DocumentStatus.READY.value,
+        active=True,
+        created_by="user-a",
+    )
+
+
+def _chunk(document: KnowledgeDocument, content: str) -> KnowledgeChunk:
+    return KnowledgeChunk(
+        id=uuid4(),
+        document_id=document.id,
+        scope=document.scope,
+        scope_id=document.scope_id,
+        version=document.version,
+        chunk_index=0,
+        page_start=1,
+        page_end=1,
+        content=content,
+        content_hash=uuid4().hex + uuid4().hex,
+        char_count=len(content),
+        embedding_model="fake-lexical-v1",
+    )
