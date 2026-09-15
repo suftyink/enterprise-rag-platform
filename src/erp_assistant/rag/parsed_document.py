@@ -12,6 +12,7 @@ class BlockKind(StrEnum):
     LIST = "LIST"
     CODE = "CODE"
     TABLE = "TABLE"
+    MIXED = "MIXED"
 
 
 @dataclass(frozen=True)

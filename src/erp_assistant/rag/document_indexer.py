@@ -23,6 +23,7 @@ from erp_assistant.rag.chunker import (
 )
 from erp_assistant.rag.document_parsers import DocumentParserRouter
 from erp_assistant.rag.errors import DocumentValidationError, OcrRequiredError, RagDependencyError
+from erp_assistant.rag.knowledge_queries import latest_job
 from erp_assistant.rag.parsed_document import ParserLimits
 from erp_assistant.rag.pdf_parser import PdfParser
 from erp_assistant.rag.types import DocumentStatus, IndexJobStatus, PublicationStatus
@@ -132,7 +133,7 @@ class DocumentIndexer:
             if document is None:
                 raise LookupError(f"Knowledge document {document_id} does not exist")
             try:
-                job = await self._latest_job(session, document_id)
+                job = await latest_job(session, document_id)
             except SQLAlchemyError as exc:
                 raise DocumentIndexRetryableError(
                     "DATABASE_READ_FAILED", "读取索引任务失败，可安全重试", 0
@@ -713,7 +714,7 @@ class DocumentIndexer:
             embedding_model=self._embedding.model,
             heading_path=list(draft.heading_path),
             anchor=draft.anchor,
-            block_kind=draft.block_kind,
+            block_kind=draft.block_kind.value,
             source_locator=draft.source_locator,
         )
 
@@ -726,16 +727,4 @@ class DocumentIndexer:
             max_compression_ratio=self._settings.knowledge_max_compression_ratio,
             minimum_text_characters=self._settings.knowledge_min_text_characters,
             minimum_text_per_page=self._settings.knowledge_min_text_per_page,
-        )
-
-    @staticmethod
-    async def _latest_job(session: AsyncSession, document_id: UUID) -> KnowledgeIndexJob | None:
-        return cast(
-            KnowledgeIndexJob | None,
-            await session.scalar(
-                select(KnowledgeIndexJob)
-                .where(KnowledgeIndexJob.document_id == document_id)
-                .order_by(KnowledgeIndexJob.created_at.desc())
-                .limit(1)
-            ),
         )

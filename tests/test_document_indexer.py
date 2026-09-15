@@ -424,6 +424,130 @@ async def test_index_html_removes_active_noise_and_preserves_anchor_context(
 
 
 @pytest.mark.asyncio
+async def test_index_html_preserves_container_text_and_standalone_anchors_in_order(
+    indexer_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    storage = MemoryStorage()
+    content = b"""<!doctype html><html><body>
+      <article id="policy">Article introduction for SKU-DIV-1.</article>
+      <a id="returns"></a>
+      <section>Return 12.5 kg parcels within 48 h.</section>
+      <div>Read <a href="/rma">the RMA guide</a> before processing.</div>
+    </body></html>"""
+    document = await _add_document(
+        indexer_factory,
+        storage,
+        version=1,
+        content=content,
+        status=DocumentStatus.QUEUED,
+        active=False,
+        media_type="text/html",
+        filename="container-content.html",
+    )
+
+    outcome = await _indexer(indexer_factory, storage, MemoryVectorWriter()).index(document.id)
+
+    async with indexer_factory() as session:
+        chunks = list(
+            (
+                await session.scalars(
+                    select(KnowledgeChunk)
+                    .where(KnowledgeChunk.document_id == document.id)
+                    .order_by(KnowledgeChunk.chunk_index)
+                )
+            ).all()
+        )
+    assert outcome.decision is IndexDecision.INDEXED_FOR_CURRENT_POLICY
+    combined = "\n".join(chunk.content for chunk in chunks)
+    assert combined.index("SKU-DIV-1") < combined.index("12.5 kg") < combined.index("RMA guide")
+    returns = next(chunk for chunk in chunks if "12.5 kg" in chunk.content)
+    assert returns.anchor == "returns"
+
+
+@pytest.mark.asyncio
+async def test_index_distinguishes_malformed_html_from_empty_html(
+    indexer_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    storage = MemoryStorage()
+    malformed = await _add_document(
+        indexer_factory,
+        storage,
+        version=1,
+        content=(
+            b"<!doctype html><html><body><section>Enough searchable policy text"
+            b"</article></body></html>"
+        ),
+        status=DocumentStatus.QUEUED,
+        active=False,
+        media_type="text/html",
+        filename="malformed.html",
+    )
+    empty = await _add_document(
+        indexer_factory,
+        storage,
+        version=2,
+        content=b"<!doctype html><html><body></body></html>",
+        status=DocumentStatus.QUEUED,
+        active=False,
+        media_type="text/html",
+        filename="empty.html",
+    )
+    indexer = _indexer(indexer_factory, storage, MemoryVectorWriter())
+
+    malformed_outcome = await indexer.index(malformed.id)
+    empty_outcome = await indexer.index(empty.id)
+
+    assert malformed_outcome.error_code == "INVALID_HTML"
+    assert empty_outcome.error_code == "EMPTY_DOCUMENT"
+
+
+@pytest.mark.asyncio
+async def test_index_keeps_structured_chunks_within_configured_maximum(
+    indexer_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    storage = MemoryStorage()
+    content = (
+        "# International Marketplace Fulfillment Rules\n\n"
+        + "SKU-LONG-42 must retain all identifiers and units at 12.5 kg. " * 8
+    ).encode()
+    document = await _add_document(
+        indexer_factory,
+        storage,
+        version=1,
+        content=content,
+        status=DocumentStatus.QUEUED,
+        active=False,
+        media_type="text/markdown",
+        filename="bounded.md",
+    )
+    settings = Settings(
+        knowledge_chunk_target=60,
+        knowledge_chunk_max=90,
+        knowledge_chunk_overlap=10,
+        knowledge_min_text_characters=1,
+    )
+
+    outcome = await _indexer(
+        indexer_factory,
+        storage,
+        MemoryVectorWriter(),
+        settings=settings,
+    ).index(document.id)
+
+    async with indexer_factory() as session:
+        chunks = list(
+            (
+                await session.scalars(
+                    select(KnowledgeChunk).where(KnowledgeChunk.document_id == document.id)
+                )
+            ).all()
+        )
+    assert outcome.decision is IndexDecision.INDEXED_FOR_CURRENT_POLICY
+    assert chunks
+    assert max(len(chunk.content) for chunk in chunks) <= 90
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("media_type", "filename", "content", "error_code"),
     [

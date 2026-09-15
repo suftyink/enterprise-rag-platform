@@ -181,31 +181,36 @@ class DocumentParserRouter:
         return parser.version if parser is not None else self.version
 
     def parse(self, media_type: str, content: bytes, limits: ParserLimits) -> ParsedDocument:
-        normalized = normalize_media_type(media_type)
-        parser = self._parsers.get(normalized)
-        if parser is None:
-            raise DocumentValidationError(
-                "UNSUPPORTED_MEDIA_TYPE", f"暂不支持媒体类型 {normalized}"
-            )
         if len(content) > limits.max_file_size:
             raise DocumentValidationError("FILE_TOO_LARGE", "文档超过允许的大小限制")
-        detected = sniff_media_type(content)
-        if detected != normalized:
-            if normalized == DOCX_MEDIA_TYPE and detected == "application/x-ole-storage":
-                raise DocumentValidationError("ENCRYPTED_DOCX", "暂不支持加密 DOCX")
-            if normalized == DOCX_MEDIA_TYPE and detected in {
-                "application/zip",
-                "application/octet-stream",
-            }:
-                raise DocumentValidationError("INVALID_DOCX", "DOCX 文件损坏或格式无效")
-            raise DocumentValidationError(
-                "MEDIA_TYPE_MISMATCH", f"声明类型 {normalized} 与实际内容 {detected} 不一致"
-            )
+        normalized = validate_media_type(media_type, content)
+        parser = self._parsers.get(normalized)
+        assert parser is not None
         return parser.parse(content, limits)
 
 
 def normalize_media_type(value: str) -> str:
-    return value.split(";", 1)[0].strip().lower()
+    normalized = value.split(";", 1)[0].strip().lower()
+    return MARKDOWN_MEDIA_TYPE if normalized == "text/x-markdown" else normalized
+
+
+def validate_media_type(media_type: str, content: bytes) -> str:
+    normalized = normalize_media_type(media_type)
+    if normalized not in SUPPORTED_MEDIA_TYPES:
+        raise DocumentValidationError("UNSUPPORTED_MEDIA_TYPE", f"暂不支持媒体类型 {normalized}")
+    detected = sniff_media_type(content)
+    if detected == normalized:
+        return normalized
+    if normalized == DOCX_MEDIA_TYPE and detected == "application/x-ole-storage":
+        raise DocumentValidationError("ENCRYPTED_DOCX", "暂不支持加密 DOCX")
+    if normalized == DOCX_MEDIA_TYPE and detected in {
+        "application/zip",
+        "application/octet-stream",
+    }:
+        raise DocumentValidationError("INVALID_DOCX", "DOCX 文件损坏或格式无效")
+    raise DocumentValidationError(
+        "MEDIA_TYPE_MISMATCH", f"声明类型 {normalized} 与实际内容 {detected} 不一致"
+    )
 
 
 def sniff_media_type(content: bytes) -> str:

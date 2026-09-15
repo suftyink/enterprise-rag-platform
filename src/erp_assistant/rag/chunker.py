@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 from hashlib import sha256
 from uuid import UUID, uuid5
 
-from erp_assistant.rag.parsed_document import ParsedBlock, ParsedDocument
+from erp_assistant.rag.parsed_document import BlockKind, ParsedBlock, ParsedDocument
 from erp_assistant.rag.pdf_parser import ParsedPage
 
 CHUNK_STRATEGY_VERSION = "structured-window-v1"
@@ -20,7 +20,7 @@ class ChunkDraft:
     content_hash: str
     heading_path: tuple[str, ...] = ()
     anchor: str | None = None
-    block_kind: str = "PARAGRAPH"
+    block_kind: BlockKind = BlockKind.PARAGRAPH
     source_locator: dict[str, object] = field(default_factory=dict)
 
 
@@ -43,10 +43,8 @@ def chunk_document(
         first = buffered[0][0]
         last = buffered[-1][0]
         content = "\n\n".join(part for _, part, _ in buffered)
-        if first.locator.heading_path and not any(
-            block.kind.value == "HEADING" for block, _, _ in buffered
-        ):
-            content = f"{' > '.join(first.locator.heading_path)}\n\n{content}"
+        prefix = _heading_prefix(buffered, max_size)
+        content = f"{prefix}{content}"
         content_hash = sha256(content.encode("utf-8")).hexdigest()
         index = len(chunks)
         part_indexes = [part_index for _, _, part_index in buffered]
@@ -70,7 +68,10 @@ def chunk_document(
             ChunkDraft(
                 id=uuid5(
                     document_id,
-                    f"{first.locator.block_index}:{last.locator.block_index}:{content_hash}",
+                    (
+                        f"{first.locator.block_index}:{part_indexes[0]}:"
+                        f"{last.locator.block_index}:{part_indexes[-1]}:{content_hash}"
+                    ),
                 ),
                 index=index,
                 page_start=page_start,
@@ -82,27 +83,49 @@ def chunk_document(
                 content_hash=content_hash,
                 heading_path=first.locator.heading_path,
                 anchor=first.locator.anchor,
-                block_kind=next(iter(block_kinds)) if len(block_kinds) == 1 else "MIXED",
+                block_kind=(
+                    BlockKind(next(iter(block_kinds))) if len(block_kinds) == 1 else BlockKind.MIXED
+                ),
                 source_locator=locator,
             )
         )
         buffered.clear()
 
     for block in document.blocks:
-        for part_index, part in enumerate(_split_block(block.text, max_size, overlap)):
+        prefix_size = len(_heading_prefix([(block, block.text, 0)], max_size))
+        part_max = max(1, max_size - prefix_size)
+        part_overlap = min(overlap, part_max - 1)
+        for part_index, part in enumerate(_split_block(block.text, part_max, part_overlap)):
             same_context = not buffered or (
                 buffered[0][0].locator.heading_path == block.locator.heading_path
                 and buffered[0][0].locator.anchor == block.locator.anchor
                 and buffered[0][0].locator.page_start == block.locator.page_start
             )
-            candidate_size = sum(len(value) + 2 for _, value, _ in buffered) + len(part)
+            candidate = [*buffered, (block, part, part_index)]
+            candidate_size = len(_heading_prefix(candidate, max_size)) + len(
+                "\n\n".join(value for _, value, _ in candidate)
+            )
             if buffered and (not same_context or candidate_size > max_size):
                 flush()
             buffered.append((block, part, part_index))
-            if sum(len(value) + 2 for _, value, _ in buffered) >= target_size:
+            buffered_size = len(_heading_prefix(buffered, max_size)) + len(
+                "\n\n".join(value for _, value, _ in buffered)
+            )
+            if buffered_size >= target_size:
                 flush()
     flush()
     return chunks
+
+
+def _heading_prefix(buffered: list[tuple[ParsedBlock, str, int]], max_size: int) -> str:
+    first = buffered[0][0]
+    if not first.locator.heading_path or any(
+        block.kind is BlockKind.HEADING for block, _, _ in buffered
+    ):
+        return ""
+    heading = " > ".join(first.locator.heading_path)
+    available = max(0, max_size - 3)
+    return f"{heading[:available]}\n\n" if available else ""
 
 
 def _split_block(text: str, max_size: int, overlap: int) -> list[str]:

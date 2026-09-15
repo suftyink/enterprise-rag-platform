@@ -32,13 +32,14 @@ from erp_assistant.infrastructure.database import get_session
 from erp_assistant.infrastructure.object_storage import ObjectStorage, get_object_storage
 from erp_assistant.models.knowledge import KnowledgeDocument, KnowledgeIndexJob
 from erp_assistant.rag.document_parsers import (
-    DOCX_MEDIA_TYPE,
-    MARKDOWN_MEDIA_TYPE,
-    SUPPORTED_MEDIA_TYPES,
-    normalize_media_type,
-    sniff_media_type,
+    validate_media_type,
 )
-from erp_assistant.rag.errors import PdfValidationError, RagDependencyError, RagError
+from erp_assistant.rag.errors import (
+    DocumentValidationError,
+    PdfValidationError,
+    RagDependencyError,
+    RagError,
+)
 from erp_assistant.rag.knowledge_eligibility import is_retrieval_eligible
 from erp_assistant.rag.knowledge_queries import latest_job
 from erp_assistant.rag.pdf_parser import PypdfParser
@@ -84,15 +85,6 @@ async def _read_document(
     file: UploadFile, settings: Settings
 ) -> tuple[bytes, int | None, str, str]:
     filename = Path(file.filename or "").name
-    declared = normalize_media_type(file.content_type or "")
-    if declared == "text/x-markdown":
-        declared = MARKDOWN_MEDIA_TYPE
-    if declared not in SUPPORTED_MEDIA_TYPES:
-        raise _error(
-            status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            "UNSUPPORTED_MEDIA_TYPE",
-            "只支持 PDF、DOCX、Markdown 和 HTML",
-        )
     content = await file.read(settings.knowledge_max_file_size + 1)
     if len(content) > settings.knowledge_max_file_size:
         raise _error(
@@ -100,24 +92,15 @@ async def _read_document(
             "FILE_TOO_LARGE",
             "文档超过允许的大小限制",
         )
-    detected = sniff_media_type(content)
-    if declared == DOCX_MEDIA_TYPE and detected == "application/x-ole-storage":
-        raise _error(status.HTTP_422_UNPROCESSABLE_CONTENT, "ENCRYPTED_DOCX", "暂不支持加密 DOCX")
-    if declared == DOCX_MEDIA_TYPE and detected in {
-        "application/zip",
-        "application/octet-stream",
-    }:
-        raise _error(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            "INVALID_DOCX",
-            "DOCX 文件损坏或格式无效",
+    try:
+        declared = validate_media_type(file.content_type or "", content)
+    except DocumentValidationError as exc:
+        status_code = (
+            status.HTTP_415_UNSUPPORTED_MEDIA_TYPE
+            if exc.code == "UNSUPPORTED_MEDIA_TYPE"
+            else status.HTTP_422_UNPROCESSABLE_CONTENT
         )
-    if detected != declared:
-        raise _error(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            "MEDIA_TYPE_MISMATCH",
-            f"声明类型 {declared} 与实际内容 {detected} 不一致",
-        )
+        raise _error(status_code, exc.code, exc.message) from exc
     page_count: int | None = None
     if declared == "application/pdf":
         try:
