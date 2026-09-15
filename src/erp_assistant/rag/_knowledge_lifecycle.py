@@ -15,6 +15,7 @@ from erp_assistant.rag.knowledge_corpus_contracts import (
     LifecycleAction,
 )
 from erp_assistant.rag.types import (
+    CleanupKind,
     CleanupStatus,
     DocumentStatus,
     PublicationStatus,
@@ -56,7 +57,7 @@ async def apply_transition(
         document.publication_status = PublicationStatus.WITHDRAWN.value
         document.active = False
         head.published_document_id = None
-        _add_cleanup(session, document, "VECTOR", head.revision + 1)
+        _add_cleanup(session, document, CleanupKind.VECTOR, head.revision + 1)
         return
     if action is LifecycleAction.RESUBMIT:
         if (
@@ -69,7 +70,7 @@ async def apply_transition(
         ):
             _invalid(action, publication)
         document.publication_status = PublicationStatus.REVIEW_PENDING.value
-        await _cancel_pending_cleanup(session, document.id)
+        await _cancel_outstanding_cleanup(session, document.id)
         return
     if action is LifecycleAction.ROLLBACK:
         if (
@@ -84,20 +85,30 @@ async def apply_transition(
     if action is LifecycleAction.REQUEST_PURGE:
         if publication is PublicationStatus.PUBLISHED:
             _invalid(action, publication)
-        if retention is RetentionStatus.PURGED:
+        if retention is not RetentionStatus.RETAINED:
             _invalid(action, publication)
         document.retention_status = RetentionStatus.PURGE_REQUESTED.value
         document.active = False
-        _add_cleanup(session, document, "VECTOR_AND_OBJECT", head.revision + 1)
+        _add_cleanup(
+            session,
+            document,
+            CleanupKind.VECTOR_AND_OBJECT,
+            head.revision + 1,
+        )
         return
     cleanup = await _latest_cleanup(session, document.id)
     if cleanup is None:
         raise CorpusError("CLEANUP_NOT_FOUND", "文档没有待处理的清理任务")
     if action is LifecycleAction.MARK_CLEANUP_FAILED:
-        if cleanup.status != CleanupStatus.PENDING.value:
+        started_here = cleanup.status == CleanupStatus.PENDING.value
+        if cleanup.status not in {
+            CleanupStatus.PENDING.value,
+            CleanupStatus.RUNNING.value,
+        }:
             _invalid(action, publication)
         cleanup.status = CleanupStatus.FAILED.value
-        cleanup.attempt += 1
+        if started_here:
+            cleanup.attempt += 1
         cleanup.error_detail = reason
         return
     if action is LifecycleAction.RETRY_CLEANUP:
@@ -109,13 +120,14 @@ async def apply_transition(
     if action is LifecycleAction.COMPLETE_CLEANUP:
         if cleanup.status not in {
             CleanupStatus.PENDING.value,
+            CleanupStatus.RUNNING.value,
             CleanupStatus.FAILED.value,
         }:
             _invalid(action, publication)
         cleanup.status = CleanupStatus.COMPLETED.value
         cleanup.error_detail = None
         document.index_artifacts_present = False
-        if cleanup.kind == "VECTOR_AND_OBJECT":
+        if cleanup.kind == CleanupKind.VECTOR_AND_OBJECT.value:
             document.retention_status = RetentionStatus.PURGED.value
         return
     _invalid(action, publication)
@@ -146,13 +158,13 @@ async def _publish(
     document.publication_status = PublicationStatus.PUBLISHED.value
     document.published_at = datetime.now(UTC)
     head.published_document_id = document.id
-    await _cancel_pending_cleanup(session, document.id)
+    await _cancel_outstanding_cleanup(session, document.id)
 
 
 def _add_cleanup(
     session: AsyncSession,
     document: KnowledgeDocument,
-    kind: str,
+    kind: CleanupKind,
     revision: int,
 ) -> None:
     artifacts = [
@@ -161,7 +173,7 @@ def _add_cleanup(
             "document_id": str(document.vector_document_id or document.id),
         }
     ]
-    if kind == "VECTOR_AND_OBJECT":
+    if kind is CleanupKind.VECTOR_AND_OBJECT:
         artifacts.extend(
             {"kind": "object", "object_key": object_key}
             for object_key in [document.object_key, document.parsed_object_key]
@@ -170,23 +182,31 @@ def _add_cleanup(
     session.add(
         KnowledgeCleanupRequest(
             document_id=document.id,
-            idempotency_key=f"{document.id}:{kind}:{revision}",
-            kind=kind,
+            idempotency_key=f"{document.id}:{kind.value}:{revision}",
+            kind=kind.value,
             status=CleanupStatus.PENDING.value,
             artifacts=artifacts,
         )
     )
 
 
-async def _cancel_pending_cleanup(session: AsyncSession, document_id: UUID) -> None:
+async def _cancel_outstanding_cleanup(session: AsyncSession, document_id: UUID) -> None:
     requests = (
         await session.scalars(
             select(KnowledgeCleanupRequest).where(
                 KnowledgeCleanupRequest.document_id == document_id,
-                KnowledgeCleanupRequest.status == CleanupStatus.PENDING.value,
+                KnowledgeCleanupRequest.status.in_(
+                    [
+                        CleanupStatus.PENDING.value,
+                        CleanupStatus.RUNNING.value,
+                        CleanupStatus.FAILED.value,
+                    ]
+                ),
             )
         )
     ).all()
+    if any(request.status == CleanupStatus.RUNNING.value for request in requests):
+        raise CorpusError("CLEANUP_IN_PROGRESS", "清理任务执行中，暂不能重新发布")
     for request in requests:
         request.status = CleanupStatus.CANCELLED.value
 
@@ -199,7 +219,10 @@ async def _latest_cleanup(
         await session.scalar(
             select(KnowledgeCleanupRequest)
             .where(KnowledgeCleanupRequest.document_id == document_id)
-            .order_by(KnowledgeCleanupRequest.created_at.desc())
+            .order_by(
+                KnowledgeCleanupRequest.created_at.desc(),
+                KnowledgeCleanupRequest.id.desc(),
+            )
             .limit(1)
         ),
     )

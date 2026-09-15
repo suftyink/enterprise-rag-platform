@@ -25,7 +25,13 @@ from erp_assistant.rag.knowledge_corpus import (
     LifecycleAction,
     PublicationStatus,
 )
-from erp_assistant.rag.types import CleanupStatus, DocumentStatus, IndexJobStatus, RetentionStatus
+from erp_assistant.rag.types import (
+    CleanupKind,
+    CleanupStatus,
+    DocumentStatus,
+    IndexJobStatus,
+    RetentionStatus,
+)
 
 
 @dataclass
@@ -83,6 +89,7 @@ async def test_successful_submission_waits_for_review(
     assert view.revision == 0
     assert view.audit_events[-1].action == "SUBMIT"
     assert view.audit_events[-1].actor_id == "reviewer-a"
+    assert view.audit_events[-1].created_at is not None
 
 
 @pytest.mark.asyncio
@@ -138,7 +145,8 @@ async def test_publish_switches_versions_atomically_and_withdraws_immediately(
     )
     assert withdrawn.publication_status is PublicationStatus.WITHDRAWN
     assert withdrawn.retrieval_eligible is False
-    assert withdrawn.cleanup_requests[-1].kind == "VECTOR"
+    assert withdrawn.cleanup_requests[-1].kind is CleanupKind.VECTOR
+    assert withdrawn.cleanup_requests[-1].idempotency_key
     assert withdrawn.audit_events[-1].reason == "unsafe content"
 
 
@@ -176,6 +184,8 @@ async def test_transition_rejects_stale_revision_without_changing_state(
     view = await corpus.inspect(document.id, _actor())
     assert view.publication_status is PublicationStatus.REJECTED
     assert view.revision == 1
+    assert view.audit_events[-1].action == "RESUBMIT"
+    assert view.audit_events[-1].result == "STALE_CORPUS_REVISION"
 
 
 @pytest.mark.asyncio
@@ -256,7 +266,19 @@ async def test_resubmit_rollback_purge_and_cleanup_compensation(
         expected_revision=6,
     )
     assert purge_requested.retention_status is RetentionStatus.PURGE_REQUESTED
-    assert purge_requested.cleanup_requests[-1].kind == "VECTOR_AND_OBJECT"
+    assert purge_requested.cleanup_requests[-1].kind is CleanupKind.VECTOR_AND_OBJECT
+    with pytest.raises(CorpusError) as repeated_purge:
+        await second_corpus.transition(
+            second.id,
+            LifecycleAction.REQUEST_PURGE,
+            _actor(),
+            reason="duplicate purge request",
+            expected_revision=7,
+        )
+    assert repeated_purge.value.code == "INVALID_CORPUS_TRANSITION"
+    after_repeated_purge = await second_corpus.inspect(second.id, _actor())
+    assert after_repeated_purge.revision == 7
+    assert len(after_repeated_purge.cleanup_requests) == 2
     failed = await second_corpus.transition(
         second.id,
         LifecycleAction.MARK_CLEANUP_FAILED,
@@ -333,6 +355,29 @@ async def test_untrusted_actor_is_rejected_at_the_corpus_boundary(
         )
 
     assert raised.value.code == "CORPUS_FORBIDDEN"
+
+
+@pytest.mark.asyncio
+async def test_submit_requires_a_new_version_for_published_content(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    document = _document(version=1)
+    document.status = DocumentStatus.READY.value
+    document.active = True
+    document.publication_status = PublicationStatus.PUBLISHED.value
+    document.index_artifacts_present = True
+    async with session_factory() as session:
+        session.add(document)
+        await session.commit()
+    corpus = KnowledgeCorpus(
+        session_factory=session_factory,
+        processor=ControlledProcessor(_outcome(document.id)),
+    )
+
+    with pytest.raises(CorpusError) as raised:
+        await corpus.submit(document.id, _actor(), reason="unsafe in-place rebuild")
+
+    assert raised.value.code == "PUBLISHED_DOCUMENT_REQUIRES_NEW_VERSION"
 
 
 def _document(*, version: int, document_key: str = "inventory-sop") -> KnowledgeDocument:

@@ -32,12 +32,13 @@ from erp_assistant.infrastructure.database import get_session
 from erp_assistant.infrastructure.object_storage import ObjectStorage, get_object_storage
 from erp_assistant.models.knowledge import KnowledgeDocument, KnowledgeIndexJob
 from erp_assistant.rag.errors import PdfValidationError, RagDependencyError, RagError
+from erp_assistant.rag.knowledge_eligibility import is_retrieval_eligible
+from erp_assistant.rag.knowledge_queries import latest_job
 from erp_assistant.rag.pdf_parser import PypdfParser
 from erp_assistant.rag.retriever import ActorContext, KnowledgeRetriever, RetrievalRequest
 from erp_assistant.rag.service import (
     accessible_document,
     create_document,
-    latest_job,
     retry_document,
 )
 from erp_assistant.rag.types import (
@@ -113,12 +114,7 @@ def _response(
         publicationStatus=PublicationStatus(document.publication_status),
         retentionStatus=RetentionStatus(document.retention_status),
         governanceRevision=document.governance_revision,
-        retrievalEligible=(
-            document.active
-            and document.status == DocumentStatus.READY.value
-            and document.publication_status == PublicationStatus.PUBLISHED.value
-            and document.retention_status == RetentionStatus.RETAINED.value
-        ),
+        retrievalEligible=is_retrieval_eligible(document),
         duplicate=duplicate,
         title=document.title,
         pageCount=document.page_count,

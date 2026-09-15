@@ -2,7 +2,8 @@ import asyncio
 from uuid import UUID
 
 from erp_assistant.infrastructure.database import engine
-from erp_assistant.rag.composition import get_knowledge_corpus
+from erp_assistant.rag.cleanup_executor import CleanupRetryableError, KnowledgeCleanupExecutor
+from erp_assistant.rag.composition import get_cleanup_executor, get_knowledge_corpus
 from erp_assistant.rag.document_indexer import DocumentIndexRetryableError
 from erp_assistant.rag.knowledge_corpus import (
     SYSTEM_CORPUS_ACTOR,
@@ -16,9 +17,7 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-async def _run_index(
-    document_id: UUID, corpus: KnowledgeCorpus | None = None
-) -> dict[str, object]:
+async def _run_index(document_id: UUID, corpus: KnowledgeCorpus | None = None) -> dict[str, object]:
     try:
         view = await (corpus or get_knowledge_corpus()).submit(
             document_id,
@@ -40,3 +39,26 @@ async def _run_index(
 )
 def index_document(document_id: str) -> dict[str, object]:
     return asyncio.run(_run_index(UUID(document_id)))
+
+
+async def _run_cleanup(
+    document_id: UUID,
+    executor: KnowledgeCleanupExecutor | None = None,
+) -> dict[str, object]:
+    try:
+        outcome = await (executor or get_cleanup_executor()).execute(document_id)
+        return outcome.to_dict()
+    finally:
+        await engine.dispose()
+
+
+@celery_app.task(  # type: ignore[untyped-decorator]
+    name="erp_assistant.cleanup_knowledge_document",
+    acks_late=True,
+    reject_on_worker_lost=True,
+    autoretry_for=(CleanupRetryableError,),
+    retry_backoff=True,
+    retry_kwargs={"max_retries": 5},
+)
+def cleanup_knowledge_document(document_id: str) -> dict[str, object]:
+    return asyncio.run(_run_cleanup(UUID(document_id)))

@@ -9,7 +9,7 @@ from erp_assistant.infrastructure.database import SessionFactory, engine
 from erp_assistant.models.knowledge import KnowledgeDocument
 from erp_assistant.rag.composition import get_document_indexer
 from erp_assistant.rag.document_indexer import DocumentIndexer, IndexDecision
-from erp_assistant.rag.types import DocumentStatus, PublicationStatus, RetentionStatus
+from erp_assistant.rag.knowledge_eligibility import retrieval_eligibility_filters
 
 
 @dataclass(frozen=True)
@@ -31,11 +31,7 @@ async def reindex_active_documents(
             (
                 await session.scalars(
                     select(KnowledgeDocument.id).where(
-                        KnowledgeDocument.active.is_(True),
-                        KnowledgeDocument.status == DocumentStatus.READY.value,
-                        KnowledgeDocument.publication_status
-                        == PublicationStatus.PUBLISHED.value,
-                        KnowledgeDocument.retention_status == RetentionStatus.RETAINED.value,
+                        *retrieval_eligibility_filters(),
                     )
                 )
             ).all()
@@ -44,8 +40,7 @@ async def reindex_active_documents(
     return ReindexResult(
         document_count=len(outcomes),
         indexed_count=sum(
-            outcome.decision is IndexDecision.INDEXED_FOR_CURRENT_POLICY
-            for outcome in outcomes
+            outcome.decision is IndexDecision.INDEXED_FOR_CURRENT_POLICY for outcome in outcomes
         ),
         skipped_count=sum(outcome.decision is IndexDecision.SKIPPED for outcome in outcomes),
         ocr_required_count=sum(

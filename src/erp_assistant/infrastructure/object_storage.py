@@ -12,6 +12,8 @@ class ObjectStorage(Protocol):
 
     def get_bytes(self, key: str) -> bytes: ...
 
+    def delete_object(self, key: str) -> None: ...
+
 
 class S3ObjectStorage:
     def __init__(
@@ -50,6 +52,9 @@ class S3ObjectStorage:
     def get_bytes(self, key: str) -> bytes:
         response = self.client.get_object(Bucket=self.bucket, Key=key)
         return cast(bytes, response["Body"].read())
+
+    def delete_object(self, key: str) -> None:
+        self.client.delete_object(Bucket=self.bucket, Key=key)
 
 
 @lru_cache

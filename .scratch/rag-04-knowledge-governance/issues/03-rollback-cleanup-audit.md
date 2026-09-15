@@ -16,4 +16,4 @@
 
 ## Answer
 
-已实现历史版本回滚、expected revision 并发保护、向量/对象清理补偿状态机及完整审计；哈希去重收敛到 scope、document key 与内容哈希，避免不同知识身份被静默合并。
+已实现历史版本回滚、expected revision 并发保护、向量/对象清理补偿状态机及完整审计；CleanupExecutor/Celery 补偿任务会幂等删除 Milvus 与对象存储工件，并通过 KnowledgeCorpus 回写失败、重试和完成审计；哈希去重收敛到 scope、document key 与内容哈希，避免不同知识身份被静默合并。

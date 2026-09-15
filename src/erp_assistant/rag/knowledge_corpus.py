@@ -27,7 +27,10 @@ from erp_assistant.rag.knowledge_corpus_contracts import (
     LifecycleAction,
     TrustedActorAuthorizer,
 )
+from erp_assistant.rag.knowledge_eligibility import is_retrieval_eligible
+from erp_assistant.rag.knowledge_queries import latest_job
 from erp_assistant.rag.types import (
+    CleanupKind,
     CleanupStatus,
     DocumentStatus,
     IndexJobStatus,
@@ -61,6 +64,11 @@ class KnowledgeCorpus:
             if document is None:
                 raise CorpusError("DOCUMENT_NOT_FOUND", "文档不存在")
             self._authorizer.require(actor, "SUBMIT", document.scope, document.scope_id)
+            if document.active or document.publication_status == PublicationStatus.PUBLISHED.value:
+                raise CorpusError(
+                    "PUBLISHED_DOCUMENT_REQUIRES_NEW_VERSION",
+                    "已发布文档必须创建新版本后再提交处理",
+                )
 
         outcome = await self._processor.index(document_id)
         async with self._sessions() as session:
@@ -68,7 +76,7 @@ class KnowledgeCorpus:
             if document is None:
                 raise CorpusError("DOCUMENT_NOT_FOUND", "文档不存在")
             document.parse_warnings = list(outcome.warnings)
-            job = await self._latest_job(session, document_id)
+            job = await latest_job(session, document_id)
             if job is None:
                 job = KnowledgeIndexJob(
                     document_id=document.id,
@@ -140,11 +148,36 @@ class KnowledgeCorpus:
     ) -> CorpusDocumentView:
         reason = self._reason(reason)
         async with self._sessions() as session:
+            document = await session.get(KnowledgeDocument, document_id)
+            if document is None:
+                raise CorpusError("DOCUMENT_NOT_FOUND", "文档不存在")
+            self._authorizer.require(actor, action.value, document.scope, document.scope_id)
+        try:
+            await self._transition(document_id, action, actor, reason, expected_revision)
+        except CorpusError as exc:
+            await self._record_failed_transition(
+                document_id,
+                action,
+                actor,
+                reason,
+                exc.code,
+            )
+            raise
+        return await self.inspect(document_id, actor)
+
+    async def _transition(
+        self,
+        document_id: UUID,
+        action: LifecycleAction,
+        actor: CorpusActor,
+        reason: str,
+        expected_revision: int,
+    ) -> None:
+        async with self._sessions() as session:
             async with session.begin():
                 document = await session.get(KnowledgeDocument, document_id)
                 if document is None:
                     raise CorpusError("DOCUMENT_NOT_FOUND", "文档不存在")
-                self._authorizer.require(actor, action.value, document.scope, document.scope_id)
                 head = await self._head(session, document, for_update=True)
                 if head is None:
                     head = KnowledgeCorpusHead(
@@ -173,11 +206,36 @@ class KnowledgeCorpus:
                         result="SUCCEEDED",
                     )
                 )
-        return await self.inspect(document_id, actor)
+
+    async def _record_failed_transition(
+        self,
+        document_id: UUID,
+        action: LifecycleAction,
+        actor: CorpusActor,
+        reason: str,
+        result: str,
+    ) -> None:
+        async with self._sessions() as session:
+            document = await session.get(KnowledgeDocument, document_id)
+            if document is None:
+                return
+            head = await self._head(session, document)
+            session.add(
+                KnowledgeLifecycleEvent(
+                    document_id=document.id,
+                    action=action.value,
+                    actor_id=actor.subject_id,
+                    reason=reason,
+                    document_version=document.version,
+                    revision=head.revision if head is not None else 0,
+                    result=result,
+                )
+            )
+            await session.commit()
 
     async def _view(self, session: AsyncSession, document: KnowledgeDocument) -> CorpusDocumentView:
         head = await self._head(session, document)
-        job = await self._latest_job(session, document.id)
+        job = await latest_job(session, document.id)
         chunk_row = (
             await session.execute(
                 select(
@@ -217,12 +275,7 @@ class KnowledgeCorpus:
             publication_status=publication,
             retention_status=retention,
             revision=head.revision if head is not None else 0,
-            retrieval_eligible=(
-                document.active
-                and document.status == DocumentStatus.READY.value
-                and publication is PublicationStatus.PUBLISHED
-                and retention is RetentionStatus.RETAINED
-            ),
+            retrieval_eligible=is_retrieval_eligible(document),
             warnings=tuple(job.warnings if job is not None else document.parse_warnings),
             pipeline_revision=job.pipeline_revision if job is not None else None,
             chunk_summary=CorpusChunkSummary(
@@ -239,13 +292,15 @@ class KnowledgeCorpus:
                     document_version=event.document_version,
                     revision=event.revision,
                     result=event.result,
+                    created_at=event.created_at,
                 )
                 for event in events
             ),
             cleanup_requests=tuple(
                 CorpusCleanup(
                     id=request.id,
-                    kind=request.kind,
+                    idempotency_key=request.idempotency_key,
+                    kind=CleanupKind(request.kind),
                     status=CleanupStatus(request.status),
                     attempt=request.attempt,
                     artifacts=tuple(request.artifacts),
@@ -272,18 +327,6 @@ class KnowledgeCorpus:
         return cast(
             KnowledgeCorpusHead | None,
             await session.scalar(statement),
-        )
-
-    @staticmethod
-    async def _latest_job(session: AsyncSession, document_id: UUID) -> KnowledgeIndexJob | None:
-        return cast(
-            KnowledgeIndexJob | None,
-            await session.scalar(
-                select(KnowledgeIndexJob)
-                .where(KnowledgeIndexJob.document_id == document_id)
-                .order_by(KnowledgeIndexJob.created_at.desc())
-                .limit(1)
-            ),
         )
 
     @staticmethod

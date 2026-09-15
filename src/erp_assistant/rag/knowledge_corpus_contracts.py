@@ -1,10 +1,12 @@
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 from typing import Protocol
 from uuid import UUID
 
 from erp_assistant.rag.document_indexer import DocumentIndexOutcome
 from erp_assistant.rag.types import (
+    CleanupKind,
     CleanupStatus,
     DocumentStatus,
     PublicationStatus,
@@ -74,12 +76,14 @@ class CorpusAuditEvent:
     document_version: int
     revision: int
     result: str
+    created_at: datetime
 
 
 @dataclass(frozen=True)
 class CorpusCleanup:
     id: UUID
-    kind: str
+    idempotency_key: str
+    kind: CleanupKind
     status: CleanupStatus
     attempt: int
     artifacts: tuple[dict[str, str], ...]

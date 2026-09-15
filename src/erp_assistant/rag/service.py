@@ -15,6 +15,7 @@ from erp_assistant.models.knowledge import (
     KnowledgeIndexJob,
 )
 from erp_assistant.rag.errors import RagDependencyError, RagError
+from erp_assistant.rag.knowledge_queries import latest_job
 from erp_assistant.rag.types import DocumentStatus, IndexJobStatus, KnowledgeScope
 from erp_assistant.workers.dispatcher import DocumentDispatcher
 
@@ -32,20 +33,6 @@ class DocumentCreateResult:
 
 def scope_id_for(scope: KnowledgeScope, tenant_id: str) -> str:
     return "GLOBAL" if scope is KnowledgeScope.GLOBAL else tenant_id
-
-
-async def latest_job(
-    session: AsyncSession, document_id: UUID
-) -> KnowledgeIndexJob | None:
-    return cast(
-        KnowledgeIndexJob | None,
-        await session.scalar(
-            select(KnowledgeIndexJob)
-            .where(KnowledgeIndexJob.document_id == document_id)
-            .order_by(KnowledgeIndexJob.created_at.desc())
-            .limit(1)
-        ),
-    )
 
 
 async def create_document(

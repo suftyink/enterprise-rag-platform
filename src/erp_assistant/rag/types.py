@@ -42,9 +42,15 @@ class RetentionStatus(StrEnum):
 
 class CleanupStatus(StrEnum):
     PENDING = "PENDING"
+    RUNNING = "RUNNING"
     FAILED = "FAILED"
     COMPLETED = "COMPLETED"
     CANCELLED = "CANCELLED"
+
+
+class CleanupKind(StrEnum):
+    VECTOR = "VECTOR"
+    VECTOR_AND_OBJECT = "VECTOR_AND_OBJECT"
 
 
 class SearchDecision(StrEnum):

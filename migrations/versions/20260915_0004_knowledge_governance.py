@@ -67,6 +67,11 @@ def upgrade() -> None:
                     WHEN status IN ('READY', 'SUPERSEDED') THEN true
                     ELSE false
                 END,
+                published_at = CASE
+                    WHEN active = true AND status = 'READY'
+                    THEN COALESCE(indexed_at, updated_at)
+                    ELSE NULL
+                END,
                 status = CASE WHEN status = 'SUPERSEDED' THEN 'READY' ELSE status END
             """
         )

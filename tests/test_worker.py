@@ -2,6 +2,7 @@ from uuid import uuid4
 
 import pytest
 
+from erp_assistant.rag.cleanup_executor import CleanupDecision, CleanupOutcome
 from erp_assistant.rag.knowledge_corpus import (
     SYSTEM_CORPUS_ACTOR,
     CorpusChunkSummary,
@@ -9,7 +10,13 @@ from erp_assistant.rag.knowledge_corpus import (
 )
 from erp_assistant.rag.types import DocumentStatus, PublicationStatus, RetentionStatus
 from erp_assistant.workers.celery_app import celery_app
-from erp_assistant.workers.tasks import _run_index, health, index_document
+from erp_assistant.workers.tasks import (
+    _run_cleanup,
+    _run_index,
+    cleanup_knowledge_document,
+    health,
+    index_document,
+)
 
 
 class StubCorpus:
@@ -24,6 +31,16 @@ class StubCorpus:
         return self.view
 
 
+class StubCleanupExecutor:
+    def __init__(self, outcome: CleanupOutcome) -> None:
+        self.outcome = outcome
+        self.calls: list[object] = []
+
+    async def execute(self, document_id: object) -> CleanupOutcome:
+        self.calls.append(document_id)
+        return self.outcome
+
+
 def test_health_task_is_registered_and_side_effect_free() -> None:
     celery_app.finalize()
     assert "erp_assistant.health" in celery_app.tasks
@@ -33,6 +50,8 @@ def test_health_task_is_registered_and_side_effect_free() -> None:
 def test_index_worker_acknowledges_only_after_persisted_outcome() -> None:
     assert index_document.acks_late is True
     assert index_document.reject_on_worker_lost is True
+    assert cleanup_knowledge_document.acks_late is True
+    assert cleanup_knowledge_document.reject_on_worker_lost is True
 
 
 @pytest.mark.asyncio
@@ -67,8 +86,23 @@ async def test_index_worker_returns_the_corpus_outcome() -> None:
 
     result = await _run_index(document_id, corpus)  # type: ignore[arg-type]
 
-    assert corpus.calls == [
-        (document_id, SYSTEM_CORPUS_ACTOR, "index pipeline completed")
-    ]
+    assert corpus.calls == [(document_id, SYSTEM_CORPUS_ACTOR, "index pipeline completed")]
     assert result == view.to_dict()
     assert result["publicationStatus"] == "REVIEW_PENDING"
+
+
+@pytest.mark.asyncio
+async def test_cleanup_worker_returns_the_executor_outcome() -> None:
+    document_id = uuid4()
+    request_id = uuid4()
+    outcome = CleanupOutcome(
+        document_id=document_id,
+        decision=CleanupDecision.COMPLETED,
+        request_id=request_id,
+    )
+    executor = StubCleanupExecutor(outcome)
+
+    result = await _run_cleanup(document_id, executor)  # type: ignore[arg-type]
+
+    assert executor.calls == [document_id]
+    assert result == outcome.to_dict()

@@ -15,13 +15,8 @@ from erp_assistant.core.config import Settings
 from erp_assistant.models.knowledge import KnowledgeChunk, KnowledgeDocument
 from erp_assistant.orchestration.providers import EmbeddingProvider, RerankProvider
 from erp_assistant.rag.errors import RagDependencyError, RagError
-from erp_assistant.rag.types import (
-    DocumentStatus,
-    KnowledgeScope,
-    PublicationStatus,
-    RetentionStatus,
-    SearchDecision,
-)
+from erp_assistant.rag.knowledge_eligibility import retrieval_eligibility_filters
+from erp_assistant.rag.types import KnowledgeScope, SearchDecision
 from erp_assistant.rag.vector_store import VectorStore
 
 
@@ -95,9 +90,7 @@ class KnowledgeRetriever:
         evidence = await self._retrieve_evidence(request)
         return RetrievalOutcome(
             decision=(
-                SearchDecision.MATCHED
-                if evidence
-                else SearchDecision.INSUFFICIENT_KNOWLEDGE
+                SearchDecision.MATCHED if evidence else SearchDecision.INSUFFICIENT_KNOWLEDGE
             ),
             evidence=evidence,
             run=RetrievalRun(
@@ -111,9 +104,7 @@ class KnowledgeRetriever:
             ),
         )
 
-    async def _retrieve_evidence(
-        self, request: RetrievalRequest
-    ) -> tuple[RetrievalEvidence, ...]:
+    async def _retrieve_evidence(self, request: RetrievalRequest) -> tuple[RetrievalEvidence, ...]:
         candidate_limit = min(
             self._settings.rag_max_candidates,
             max(20, request.evidence_limit * self._settings.rag_candidate_multiplier),
@@ -143,19 +134,12 @@ class KnowledgeRetriever:
                     .join(KnowledgeDocument, KnowledgeDocument.id == KnowledgeChunk.document_id)
                     .where(
                         KnowledgeChunk.id.in_([hit.chunk_id for hit in hits]),
-                        KnowledgeDocument.active.is_(True),
-                        KnowledgeDocument.status == DocumentStatus.READY.value,
-                        KnowledgeDocument.publication_status
-                        == PublicationStatus.PUBLISHED.value,
-                        KnowledgeDocument.retention_status == RetentionStatus.RETAINED.value,
+                        *retrieval_eligibility_filters(),
                         or_(
                             KnowledgeDocument.scope == KnowledgeScope.GLOBAL.value,
                             (
                                 (KnowledgeDocument.scope == KnowledgeScope.TENANT.value)
-                                & (
-                                    KnowledgeDocument.scope_id
-                                    == request.actor.tenant_id
-                                )
+                                & (KnowledgeDocument.scope_id == request.actor.tenant_id)
                             ),
                         ),
                     )
@@ -194,9 +178,7 @@ class KnowledgeRetriever:
             seen_indexes.add(ranked_document.index)
             if ranked_document.score < self._settings.rag_rerank_threshold:
                 continue
-            chunk, document, retrieval_rank, retrieval_score = candidates[
-                ranked_document.index
-            ]
+            chunk, document, retrieval_rank, retrieval_score = candidates[ranked_document.index]
             scored_evidence.append(
                 (
                     RetrievalEvidence(
@@ -218,9 +200,7 @@ class KnowledgeRetriever:
             )
         if len(seen_indexes) != len(candidates):
             raise RagDependencyError("RERANK_INVALID_RESPONSE", "候选结果重排响应无效")
-        scored_evidence.sort(
-            key=lambda item: (-item[0].score, -item[1], str(item[0].chunk_id))
-        )
+        scored_evidence.sort(key=lambda item: (-item[0].score, -item[1], str(item[0].chunk_id)))
         return tuple(item[0] for item in scored_evidence[: request.evidence_limit])
 
     @staticmethod
