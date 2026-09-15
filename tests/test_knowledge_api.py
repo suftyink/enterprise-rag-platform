@@ -139,13 +139,22 @@ async def test_upload_status_and_hash_deduplication(
     knowledge_api: KnowledgeApiContext,
 ) -> None:
     client, _, storage, _ = knowledge_api
-    first = await _upload(client)
-    second = await _upload(client)
+    content = make_pdf(["Inventory stock policy contains enough searchable text. " * 4])
+    first = await _upload(client, content=content)
+    second = await _upload(client, content=content)
+    distinct_identity = await _upload(
+        client,
+        content=content,
+        document_key="shipping-sop",
+    )
     assert first.status_code == 202
     assert second.status_code == 200
     assert second.json()["duplicate"] is True
     assert first.json()["documentId"] == second.json()["documentId"]
-    assert len(storage.objects) == 1
+    assert distinct_identity.status_code == 202
+    assert distinct_identity.json()["duplicate"] is False
+    assert distinct_identity.json()["documentId"] != first.json()["documentId"]
+    assert len(storage.objects) == 2
 
     status_response = await client.get(
         f"/api/assistant/v1/knowledge/documents/{first.json()['documentId']}",
@@ -153,6 +162,10 @@ async def test_upload_status_and_hash_deduplication(
     )
     assert status_response.status_code == 200
     assert status_response.json()["status"] == "QUEUED"
+    assert status_response.json()["publicationStatus"] == "UNPUBLISHED"
+    assert status_response.json()["retentionStatus"] == "RETAINED"
+    assert status_response.json()["governanceRevision"] == 0
+    assert status_response.json()["retrievalEligible"] is False
     assert status_response.json()["jobStatus"] == "QUEUED"
     assert status_response.json()["attempt"] == 0
     assert status_response.json()["chunkCount"] == 0
@@ -324,6 +337,9 @@ def _ready_document(scope: str, scope_id: str, key: str) -> KnowledgeDocument:
         page_count=1,
         status=DocumentStatus.READY.value,
         active=True,
+        publication_status="PUBLISHED",
+        retention_status="RETAINED",
+        index_artifacts_present=True,
         created_by="user-a",
     )
 

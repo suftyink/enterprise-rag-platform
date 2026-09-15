@@ -2,10 +2,11 @@ import asyncio
 from uuid import UUID
 
 from erp_assistant.infrastructure.database import engine
-from erp_assistant.rag.composition import get_document_indexer
-from erp_assistant.rag.document_indexer import (
-    DocumentIndexer,
-    DocumentIndexRetryableError,
+from erp_assistant.rag.composition import get_knowledge_corpus
+from erp_assistant.rag.document_indexer import DocumentIndexRetryableError
+from erp_assistant.rag.knowledge_corpus import (
+    SYSTEM_CORPUS_ACTOR,
+    KnowledgeCorpus,
 )
 from erp_assistant.workers.celery_app import celery_app
 
@@ -16,11 +17,15 @@ def health() -> dict[str, str]:
 
 
 async def _run_index(
-    document_id: UUID, indexer: DocumentIndexer | None = None
+    document_id: UUID, corpus: KnowledgeCorpus | None = None
 ) -> dict[str, object]:
     try:
-        outcome = await (indexer or get_document_indexer()).index(document_id)
-        return outcome.to_dict()
+        view = await (corpus or get_knowledge_corpus()).submit(
+            document_id,
+            SYSTEM_CORPUS_ACTOR,
+            reason="index pipeline completed",
+        )
+        return view.to_dict()
     finally:
         await engine.dispose()
 

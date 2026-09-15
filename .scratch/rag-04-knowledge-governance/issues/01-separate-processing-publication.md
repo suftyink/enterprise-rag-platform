@@ -4,11 +4,15 @@
 
 **Blocked by:** rag-03-document-indexer/03 / 恢复部分索引并统一重建路径.
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] 处理状态与发布状态可独立表达且具有合法转换规则。
-- [ ] 新上传文档处理成功后进入 REVIEW_PENDING 而非 PUBLISHED。
-- [ ] REVIEW_PENDING 文档不会被 Retriever 返回。
-- [ ] 当前 active READY 数据迁移为已处理且已发布。
-- [ ] 历史非活动或已取代版本保留可解释的历史状态。
-- [ ] 状态 API 能区分处理进度、审核状态和发布状态。
+- [x] 处理状态与发布状态可独立表达且具有合法转换规则。
+- [x] 新上传文档处理成功后进入 REVIEW_PENDING 而非 PUBLISHED。
+- [x] REVIEW_PENDING 文档不会被 Retriever 返回。
+- [x] 当前 active READY 数据迁移为已处理且已发布。
+- [x] 历史非活动或已取代版本保留可解释的历史状态。
+- [x] 状态 API 能区分处理进度、审核状态和发布状态。
+
+## Answer
+
+已拆分 processing、publication 与 retention 状态；索引器不再自动激活版本，`KnowledgeCorpus.submit` 将成功产物送入待审核状态，Retriever 和状态 API 同步采用新的发布资格规则，迁移保留现有已发布与历史版本含义。

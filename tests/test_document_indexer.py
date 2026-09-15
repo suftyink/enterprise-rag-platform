@@ -205,6 +205,9 @@ async def _add_document(
         page_count=1,
         status=status.value,
         active=active,
+        publication_status="PUBLISHED" if active else "UNPUBLISHED",
+        retention_status="RETAINED",
+        index_artifacts_present=status == DocumentStatus.READY,
         created_by="user-a",
     )
     async with factory() as session:
@@ -223,7 +226,7 @@ async def _add_document(
 
 
 @pytest.mark.asyncio
-async def test_index_indexes_pdf_and_activates_new_version_after_durable_write(
+async def test_index_indexes_pdf_without_publishing_new_version(
     indexer_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     storage = MemoryStorage()
@@ -274,10 +277,10 @@ async def test_index_indexes_pdf_and_activates_new_version_after_durable_write(
             select(KnowledgeIndexJob).where(KnowledgeIndexJob.document_id == new.id)
         )
     assert [document.status for document in documents] == [
-        DocumentStatus.SUPERSEDED.value,
+        DocumentStatus.READY.value,
         DocumentStatus.READY.value,
     ]
-    assert [document.active for document in documents] == [False, True]
+    assert [document.active for document in documents] == [True, False]
     assert len(chunks) == outcome.chunk_count
     assert all(chunk.embedding_model == "fake-lexical-v1" for chunk in chunks)
     assert job is not None
@@ -285,7 +288,7 @@ async def test_index_indexes_pdf_and_activates_new_version_after_durable_write(
     assert job.phase == DocumentStatus.READY.value
     assert job.chunk_count == outcome.chunk_count
     assert job.pipeline_revision == outcome.pipeline.revision
-    assert old.id in vectors.deleted
+    assert old.id not in vectors.deleted
     assert documents[1].vector_document_id in vectors.documents
     assert any(key.endswith("parsed/pages.json") for key in storage.objects)
 
@@ -603,7 +606,7 @@ async def test_index_recovers_chunks_after_vector_failure_and_preserves_old_vers
     assert [chunk.id for chunk in chunks_after_recovery] == [
         chunk.id for chunk in chunks_after_failure
     ]
-    assert old.id in vectors.deleted
+    assert old.id not in vectors.deleted
     async with indexer_factory() as session:
         job = await session.scalar(
             select(KnowledgeIndexJob).where(KnowledgeIndexJob.document_id == new.id)
@@ -667,7 +670,7 @@ async def test_index_records_vector_artifact_when_activation_commit_fails_and_re
 
     assert outcome.status == DocumentStatus.READY
     assert outcome.attempt == 2
-    assert old.id in vectors.deleted
+    assert old.id not in vectors.deleted
 
 
 @pytest.mark.asyncio
@@ -717,21 +720,13 @@ async def test_index_retries_deferred_old_vector_cleanup_without_reindexing(
 ) -> None:
     storage = MemoryStorage()
     vectors = MemoryVectorWriter(fail_deletes=True)
-    old = await _add_document(
-        indexer_factory,
-        storage,
-        version=1,
-        content=make_pdf(["Old usable policy content. " * 8]),
-        status=DocumentStatus.READY,
-        active=True,
-    )
     new = await _add_document(
         indexer_factory,
         storage,
         version=2,
         content=make_pdf(["Replacement policy content. " * 8]),
         status=DocumentStatus.QUEUED,
-        active=False,
+        active=True,
     )
     indexer = _indexer(indexer_factory, storage, vectors)
 
@@ -757,7 +752,7 @@ async def test_index_retries_deferred_old_vector_cleanup_without_reindexing(
     assert outcome.cleanup_required is False
     assert "VECTOR_CLEANUP_PENDING" not in outcome.warnings
     assert vectors.upsert_count == 1
-    assert old.id in vectors.deleted
+    assert new.id in vectors.deleted
 
 
 @pytest.mark.asyncio
@@ -766,21 +761,13 @@ async def test_index_persists_cleanup_intent_before_external_delete(
 ) -> None:
     storage = MemoryStorage()
     vectors = WorkerLossVectorWriter()
-    old = await _add_document(
-        indexer_factory,
-        storage,
-        version=1,
-        content=make_pdf(["Old usable policy content. " * 8]),
-        status=DocumentStatus.READY,
-        active=True,
-    )
     new = await _add_document(
         indexer_factory,
         storage,
         version=2,
         content=make_pdf(["Replacement policy content. " * 8]),
         status=DocumentStatus.QUEUED,
-        active=False,
+        active=True,
     )
 
     with pytest.raises(SimulatedWorkerLoss):
@@ -795,7 +782,7 @@ async def test_index_persists_cleanup_intent_before_external_delete(
     assert stored_new.status == DocumentStatus.READY.value
     assert job is not None and job.cleanup_required is True
     assert job.cleanup_artifacts == [
-        {"kind": "vector_document", "document_id": str(old.id)}
+        {"kind": "vector_document", "document_id": str(new.id)}
     ]
 
 
@@ -811,7 +798,7 @@ async def test_reindex_uses_indexer_pipeline_revision_and_reports_idempotent_rep
         version=1,
         content=make_pdf(["Active inventory policy content. " * 8]),
         status=DocumentStatus.QUEUED,
-        active=False,
+        active=True,
     )
     await _indexer(indexer_factory, storage, first_vectors).index(document.id)
     replacement_vectors = MemoryVectorWriter(identity="memory-index-v2")
@@ -842,7 +829,7 @@ async def test_failed_active_reindex_keeps_document_retrievable_and_reports_fail
         version=1,
         content=make_pdf(["Active inventory policy content. " * 8]),
         status=DocumentStatus.QUEUED,
-        active=False,
+        active=True,
     )
     await _indexer(
         indexer_factory,
@@ -884,7 +871,7 @@ async def test_active_reindex_vector_failure_preserves_old_chunks_and_vectors(
         version=1,
         content=make_pdf(["Active inventory policy content. " * 8]),
         status=DocumentStatus.QUEUED,
-        active=False,
+        active=True,
     )
     await _indexer(indexer_factory, storage, vectors).index(document.id)
     async with indexer_factory() as session:

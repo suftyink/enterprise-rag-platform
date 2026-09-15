@@ -1,7 +1,7 @@
 # Spec 04：分离知识处理与审核发布生命周期
 
 Type: spec
-Status: ready-for-agent
+Status: resolved
 Blocked by: rag-03-document-indexer
 Primary test seam: `KnowledgeCorpus`
 

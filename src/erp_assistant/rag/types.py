@@ -25,6 +25,28 @@ class IndexJobStatus(StrEnum):
     FAILED = "FAILED"
 
 
+class PublicationStatus(StrEnum):
+    UNPUBLISHED = "UNPUBLISHED"
+    REVIEW_PENDING = "REVIEW_PENDING"
+    PUBLISHED = "PUBLISHED"
+    SUPERSEDED = "SUPERSEDED"
+    REJECTED = "REJECTED"
+    WITHDRAWN = "WITHDRAWN"
+
+
+class RetentionStatus(StrEnum):
+    RETAINED = "RETAINED"
+    PURGE_REQUESTED = "PURGE_REQUESTED"
+    PURGED = "PURGED"
+
+
+class CleanupStatus(StrEnum):
+    PENDING = "PENDING"
+    FAILED = "FAILED"
+    COMPLETED = "COMPLETED"
+    CANCELLED = "CANCELLED"
+
+
 class SearchDecision(StrEnum):
     MATCHED = "MATCHED"
     INSUFFICIENT_KNOWLEDGE = "INSUFFICIENT_KNOWLEDGE"

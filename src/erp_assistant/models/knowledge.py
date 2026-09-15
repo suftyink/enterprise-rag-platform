@@ -13,6 +13,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     Uuid,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -26,7 +27,13 @@ def utc_now() -> datetime:
 class KnowledgeDocument(Base):
     __tablename__ = "knowledge_document"
     __table_args__ = (
-        UniqueConstraint("scope", "scope_id", "sha256", name="uq_knowledge_document_hash"),
+        UniqueConstraint(
+            "scope",
+            "scope_id",
+            "document_key",
+            "sha256",
+            name="uq_knowledge_document_hash",
+        ),
         UniqueConstraint(
             "scope",
             "scope_id",
@@ -35,7 +42,15 @@ class KnowledgeDocument(Base):
             name="uq_knowledge_document_version",
         ),
         Index("ix_knowledge_document_scope_status", "scope", "scope_id", "status"),
-        Index("ix_knowledge_document_key_active", "scope", "scope_id", "document_key", "active"),
+        Index(
+            "ix_knowledge_document_key_active",
+            "scope",
+            "scope_id",
+            "document_key",
+            unique=True,
+            postgresql_where=text("active"),
+            sqlite_where=text("active = 1"),
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
@@ -55,6 +70,17 @@ class KnowledgeDocument(Base):
     page_count: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    publication_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="UNPUBLISHED"
+    )
+    retention_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="RETAINED"
+    )
+    governance_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    index_artifacts_present: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     error_code: Mapped[str | None] = mapped_column(String(64))
     error_detail: Mapped[str | None] = mapped_column(Text)
     parse_warnings: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
@@ -127,3 +153,68 @@ class KnowledgeIndexJob(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     document: Mapped[KnowledgeDocument] = relationship(back_populates="jobs")
+
+
+class KnowledgeCorpusHead(Base):
+    __tablename__ = "knowledge_corpus_head"
+    __table_args__ = (
+        UniqueConstraint(
+            "scope", "scope_id", "document_key", name="uq_knowledge_corpus_head"
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    scope: Mapped[str] = mapped_column(String(16), nullable=False)
+    scope_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    document_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    published_document_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("knowledge_document.id", ondelete="SET NULL")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
+class KnowledgeLifecycleEvent(Base):
+    __tablename__ = "knowledge_lifecycle_event"
+    __table_args__ = (
+        Index("ix_knowledge_lifecycle_event_document", "document_id", "created_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    document_id: Mapped[UUID] = mapped_column(
+        ForeignKey("knowledge_document.id", ondelete="RESTRICT"), nullable=False
+    )
+    action: Mapped[str] = mapped_column(String(32), nullable=False)
+    actor_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    reason: Mapped[str] = mapped_column(String(500), nullable=False)
+    document_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    result: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class KnowledgeCleanupRequest(Base):
+    __tablename__ = "knowledge_cleanup_request"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_knowledge_cleanup_idempotency"),
+        Index("ix_knowledge_cleanup_document", "document_id", "created_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    document_id: Mapped[UUID] = mapped_column(
+        ForeignKey("knowledge_document.id", ondelete="RESTRICT"), nullable=False
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    artifacts: Mapped[list[dict[str, str]]] = mapped_column(
+        JSON, nullable=False, default=list
+    )
+    error_detail: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )

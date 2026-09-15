@@ -15,7 +15,13 @@ from erp_assistant.core.config import Settings
 from erp_assistant.models.knowledge import KnowledgeChunk, KnowledgeDocument
 from erp_assistant.orchestration.providers import EmbeddingProvider, RerankProvider
 from erp_assistant.rag.errors import RagDependencyError, RagError
-from erp_assistant.rag.types import DocumentStatus, KnowledgeScope, SearchDecision
+from erp_assistant.rag.types import (
+    DocumentStatus,
+    KnowledgeScope,
+    PublicationStatus,
+    RetentionStatus,
+    SearchDecision,
+)
 from erp_assistant.rag.vector_store import VectorStore
 
 
@@ -139,6 +145,9 @@ class KnowledgeRetriever:
                         KnowledgeChunk.id.in_([hit.chunk_id for hit in hits]),
                         KnowledgeDocument.active.is_(True),
                         KnowledgeDocument.status == DocumentStatus.READY.value,
+                        KnowledgeDocument.publication_status
+                        == PublicationStatus.PUBLISHED.value,
+                        KnowledgeDocument.retention_status == RetentionStatus.RETAINED.value,
                         or_(
                             KnowledgeDocument.scope == KnowledgeScope.GLOBAL.value,
                             (

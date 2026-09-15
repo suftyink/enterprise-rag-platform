@@ -40,7 +40,13 @@ from erp_assistant.rag.service import (
     latest_job,
     retry_document,
 )
-from erp_assistant.rag.types import DocumentStatus, IndexJobStatus, KnowledgeScope
+from erp_assistant.rag.types import (
+    DocumentStatus,
+    IndexJobStatus,
+    KnowledgeScope,
+    PublicationStatus,
+    RetentionStatus,
+)
 from erp_assistant.workers.dispatcher import DocumentDispatcher, get_document_dispatcher
 
 router = APIRouter()
@@ -104,6 +110,15 @@ def _response(
         version=document.version,
         scope=KnowledgeScope(document.scope),
         status=DocumentStatus(document.status),
+        publicationStatus=PublicationStatus(document.publication_status),
+        retentionStatus=RetentionStatus(document.retention_status),
+        governanceRevision=document.governance_revision,
+        retrievalEligible=(
+            document.active
+            and document.status == DocumentStatus.READY.value
+            and document.publication_status == PublicationStatus.PUBLISHED.value
+            and document.retention_status == RetentionStatus.RETAINED.value
+        ),
         duplicate=duplicate,
         title=document.title,
         pageCount=document.page_count,

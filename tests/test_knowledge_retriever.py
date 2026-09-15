@@ -200,7 +200,16 @@ async def test_retrieve_returns_only_ready_active_permitted_evidence(
     inactive.active = False
     failed = _ready_document("TENANT", "tenant-a", "failed-policy")
     failed.status = DocumentStatus.FAILED.value
-    documents = [permitted, global_document, other_tenant, inactive, failed]
+    review_pending = _ready_document("TENANT", "tenant-a", "pending-policy")
+    review_pending.publication_status = "REVIEW_PENDING"
+    documents = [
+        permitted,
+        global_document,
+        other_tenant,
+        inactive,
+        failed,
+        review_pending,
+    ]
     chunks = [_chunk(document, "inventory policy evidence") for document in documents]
     vector_store = RecordingVectorStore(
         hits=[VectorHit(chunk_id=chunk.id, score=0.9) for chunk in chunks]
@@ -641,6 +650,9 @@ def _ready_document(scope: str, scope_id: str, key: str) -> KnowledgeDocument:
         page_count=1,
         status=DocumentStatus.READY.value,
         active=True,
+        publication_status="PUBLISHED",
+        retention_status="RETAINED",
+        index_artifacts_present=True,
         created_by="user-a",
     )
 

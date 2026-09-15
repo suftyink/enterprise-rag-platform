@@ -9,7 +9,11 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from erp_assistant.infrastructure.object_storage import ObjectStorage
-from erp_assistant.models.knowledge import KnowledgeDocument, KnowledgeIndexJob
+from erp_assistant.models.knowledge import (
+    KnowledgeCorpusHead,
+    KnowledgeDocument,
+    KnowledgeIndexJob,
+)
 from erp_assistant.rag.errors import RagDependencyError, RagError
 from erp_assistant.rag.types import DocumentStatus, IndexJobStatus, KnowledgeScope
 from erp_assistant.workers.dispatcher import DocumentDispatcher
@@ -65,6 +69,7 @@ async def create_document(
         select(KnowledgeDocument).where(
             KnowledgeDocument.scope == scope.value,
             KnowledgeDocument.scope_id == owner,
+            KnowledgeDocument.document_key == document_key,
             KnowledgeDocument.sha256 == digest,
         )
     )
@@ -112,6 +117,21 @@ async def create_document(
         phase=DocumentStatus.QUEUED.value,
     )
     session.add_all([document, job])
+    corpus_head = await session.scalar(
+        select(KnowledgeCorpusHead).where(
+            KnowledgeCorpusHead.scope == scope.value,
+            KnowledgeCorpusHead.scope_id == owner,
+            KnowledgeCorpusHead.document_key == document_key,
+        )
+    )
+    if corpus_head is None:
+        session.add(
+            KnowledgeCorpusHead(
+                scope=scope.value,
+                scope_id=owner,
+                document_key=document_key,
+            )
+        )
     await session.commit()
 
     try:

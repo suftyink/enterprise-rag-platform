@@ -9,7 +9,7 @@ from erp_assistant.infrastructure.database import SessionFactory, engine
 from erp_assistant.models.knowledge import KnowledgeDocument
 from erp_assistant.rag.composition import get_document_indexer
 from erp_assistant.rag.document_indexer import DocumentIndexer, IndexDecision
-from erp_assistant.rag.types import DocumentStatus
+from erp_assistant.rag.types import DocumentStatus, PublicationStatus, RetentionStatus
 
 
 @dataclass(frozen=True)
@@ -33,6 +33,9 @@ async def reindex_active_documents(
                     select(KnowledgeDocument.id).where(
                         KnowledgeDocument.active.is_(True),
                         KnowledgeDocument.status == DocumentStatus.READY.value,
+                        KnowledgeDocument.publication_status
+                        == PublicationStatus.PUBLISHED.value,
+                        KnowledgeDocument.retention_status == RetentionStatus.RETAINED.value,
                     )
                 )
             ).all()

@@ -2,24 +2,26 @@ from uuid import uuid4
 
 import pytest
 
-from erp_assistant.rag.document_indexer import (
-    DocumentIndexOutcome,
-    IndexDecision,
-    IndexPipelineIdentity,
+from erp_assistant.rag.knowledge_corpus import (
+    SYSTEM_CORPUS_ACTOR,
+    CorpusChunkSummary,
+    CorpusDocumentView,
 )
-from erp_assistant.rag.types import DocumentStatus
+from erp_assistant.rag.types import DocumentStatus, PublicationStatus, RetentionStatus
 from erp_assistant.workers.celery_app import celery_app
 from erp_assistant.workers.tasks import _run_index, health, index_document
 
 
-class StubIndexer:
-    def __init__(self, outcome: DocumentIndexOutcome) -> None:
-        self.outcome = outcome
-        self.calls: list[object] = []
+class StubCorpus:
+    def __init__(self, view: CorpusDocumentView) -> None:
+        self.view = view
+        self.calls: list[tuple[object, object, str]] = []
 
-    async def index(self, document_id: object) -> DocumentIndexOutcome:
-        self.calls.append(document_id)
-        return self.outcome
+    async def submit(
+        self, document_id: object, actor: object, *, reason: str
+    ) -> CorpusDocumentView:
+        self.calls.append((document_id, actor, reason))
+        return self.view
 
 
 def test_health_task_is_registered_and_side_effect_free() -> None:
@@ -34,29 +36,39 @@ def test_index_worker_acknowledges_only_after_persisted_outcome() -> None:
 
 
 @pytest.mark.asyncio
-async def test_index_worker_returns_the_indexer_outcome() -> None:
+async def test_index_worker_returns_the_corpus_outcome() -> None:
     document_id = uuid4()
-    pipeline = IndexPipelineIdentity(
-        parser="parser-v1",
-        chunking="chunk-v1",
-        embedding="embedding-v1",
-        vector_index="index-v1",
-        revision="a" * 64,
-    )
-    outcome = DocumentIndexOutcome(
+    view = CorpusDocumentView(
         document_id=document_id,
-        decision=IndexDecision.OCR_REQUIRED,
-        status=DocumentStatus.OCR_REQUIRED,
-        chunk_count=0,
+        document_key="inventory-sop",
+        version=1,
+        title="Inventory SOP",
+        original_filename="inventory.pdf",
+        media_type="application/pdf",
+        size_bytes=100,
+        sha256="a" * 64,
+        processing_status=DocumentStatus.READY,
+        publication_status=PublicationStatus.REVIEW_PENDING,
+        retention_status=RetentionStatus.RETAINED,
+        revision=0,
+        retrieval_eligible=False,
         warnings=("PAGE_1_NO_TEXT",),
-        attempt=1,
-        pipeline=pipeline,
-        error_code="OCR_REQUIRED",
+        pipeline_revision="a" * 64,
+        chunk_summary=CorpusChunkSummary(
+            chunk_count=0,
+            character_count=0,
+            first_page=None,
+            last_page=None,
+        ),
+        audit_events=(),
+        cleanup_requests=(),
     )
-    indexer = StubIndexer(outcome)
+    corpus = StubCorpus(view)
 
-    result = await _run_index(document_id, indexer)  # type: ignore[arg-type]
+    result = await _run_index(document_id, corpus)  # type: ignore[arg-type]
 
-    assert indexer.calls == [document_id]
-    assert result == outcome.to_dict()
-    assert result["decision"] == "OCR_REQUIRED"
+    assert corpus.calls == [
+        (document_id, SYSTEM_CORPUS_ACTOR, "index pipeline completed")
+    ]
+    assert result == view.to_dict()
+    assert result["publicationStatus"] == "REVIEW_PENDING"

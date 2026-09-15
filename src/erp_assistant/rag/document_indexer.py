@@ -310,26 +310,7 @@ class DocumentIndexer:
                     session.add_all(
                         [self._chunk_model(document, draft) for draft in drafts]
                     )
-                previous_documents = list(
-                    (
-                        await session.scalars(
-                            select(KnowledgeDocument).where(
-                                KnowledgeDocument.scope == document.scope,
-                                KnowledgeDocument.scope_id == document.scope_id,
-                                KnowledgeDocument.document_key == document.document_key,
-                                KnowledgeDocument.active.is_(True),
-                                KnowledgeDocument.id != document.id,
-                            )
-                        )
-                    ).all()
-                )
-                for previous in previous_documents:
-                    previous.active = False
-                    previous.status = DocumentStatus.SUPERSEDED.value
-                cleanup_ids = [
-                    previous.vector_document_id or previous.id
-                    for previous in previous_documents
-                ]
+                cleanup_ids: list[UUID] = []
                 if was_active:
                     cleanup_ids.append(document.vector_document_id or document.id)
                 cleanup_ids = [
@@ -337,9 +318,10 @@ class DocumentIndexer:
                     for cleanup_id in cleanup_ids
                     if cleanup_id != vector_document_id
                 ]
-                document.active = True
+                document.active = was_active
                 document.status = DocumentStatus.READY.value
                 document.vector_document_id = vector_document_id
+                document.index_artifacts_present = True
                 document.indexed_at = utc_now()
                 document.error_code = None
                 document.error_detail = None

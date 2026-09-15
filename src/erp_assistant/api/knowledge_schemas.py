@@ -6,6 +6,8 @@ from erp_assistant.rag.types import (
     DocumentStatus,
     IndexJobStatus,
     KnowledgeScope,
+    PublicationStatus,
+    RetentionStatus,
     SearchDecision,
 )
 
@@ -18,6 +20,10 @@ class KnowledgeDocumentResponse(BaseModel):
     version: int
     scope: KnowledgeScope
     status: DocumentStatus
+    publication_status: PublicationStatus = Field(alias="publicationStatus")
+    retention_status: RetentionStatus = Field(alias="retentionStatus")
+    governance_revision: int = Field(alias="governanceRevision")
+    retrieval_eligible: bool = Field(alias="retrievalEligible")
     duplicate: bool = False
     title: str
     page_count: int | None = Field(default=None, alias="pageCount")
