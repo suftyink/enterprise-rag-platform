@@ -20,7 +20,12 @@ from erp_assistant.rag.cleanup_executor import (
 )
 from erp_assistant.rag.document_indexer import DocumentIndexOutcome
 from erp_assistant.rag.knowledge_corpus import SYSTEM_CORPUS_ACTOR, KnowledgeCorpus
-from erp_assistant.rag.types import CleanupStatus, DocumentStatus, RetentionStatus
+from erp_assistant.rag.types import (
+    CleanupStatus,
+    DataClassification,
+    DocumentStatus,
+    RetentionStatus,
+)
 
 
 class UnusedProcessor:
@@ -107,6 +112,7 @@ async def test_cleanup_executor_deletes_artifacts_and_completes_through_corpus(
         title="Inventory SOP",
         original_filename="inventory.pdf",
         media_type="application/pdf",
+        data_classification=DataClassification.RESTRICTED.value,
         size_bytes=100,
         sha256="a" * 64,
         object_key="knowledge/inventory/original.pdf",
@@ -149,18 +155,24 @@ async def test_cleanup_executor_deletes_artifacts_and_completes_through_corpus(
         processor=UnusedProcessor(),
     )
     storage = RecordingStorage()
-    vectors = RecordingVectors()
+    ordinary_vectors = RecordingVectors(identity="ordinary-vectors")
+    restricted_vectors = RecordingVectors(identity="restricted-vectors")
     executor = KnowledgeCleanupExecutor(
         session_factory=session_factory,
         storage=storage,
-        vectors=vectors,  # type: ignore[arg-type]
+        vectors=ordinary_vectors,  # type: ignore[arg-type]
+        vectors_by_classification={
+            DataClassification.ORDINARY: ordinary_vectors,  # type: ignore[dict-item]
+            DataClassification.RESTRICTED: restricted_vectors,  # type: ignore[dict-item]
+        },
         corpus=corpus,
     )
 
     outcome = await executor.execute(document_id)
 
     assert outcome.decision is CleanupDecision.COMPLETED
-    assert vectors.deleted == [vector_id]
+    assert ordinary_vectors.deleted == []
+    assert restricted_vectors.deleted == [vector_id]
     assert storage.deleted == [document.object_key, document.parsed_object_key]
     view = await corpus.inspect(document_id, SYSTEM_CORPUS_ACTOR)
     assert view.retention_status is RetentionStatus.PURGED

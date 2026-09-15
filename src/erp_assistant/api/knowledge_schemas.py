@@ -96,6 +96,7 @@ class KnowledgeSearchPipeline(BaseModel):
     production_ready: bool = Field(alias="productionReady")
     request_count: int = Field(alias="requestCount")
     input_tokens: int = Field(alias="inputTokens")
+    retrieval_config: dict[str, int | float | bool | str] = Field(alias="retrievalConfig")
 
 
 class KnowledgeSearchResponse(BaseModel):

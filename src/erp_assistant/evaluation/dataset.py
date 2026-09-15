@@ -122,6 +122,8 @@ def _parse_case(value: Any, line_number: int) -> EvaluationCase:
         data_classification = DataClassification(
             value.get("dataClassification", DataClassification.ORDINARY.value)
         )
+        if data_classification is DataClassification.UNCLASSIFIED:
+            raise ValueError("Evaluation cases must have an executable classification")
         category_set = frozenset(EvaluationCategory(category) for category in categories)
         sources = tuple(_parse_source(source, line_number) for source in expected_sources)
     except (TypeError, ValueError) as exc:

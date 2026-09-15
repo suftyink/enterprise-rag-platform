@@ -11,7 +11,7 @@ from erp_assistant.rag.retriever import (
     RetrievalRequest,
     RetrievalRun,
 )
-from erp_assistant.rag.types import KnowledgeScope, SearchDecision
+from erp_assistant.rag.types import DataClassification, KnowledgeScope, SearchDecision
 
 
 class HttpRetrievalAdapter:
@@ -19,6 +19,11 @@ class HttpRetrievalAdapter:
         self._client = client
 
     async def retrieve(self, request: RetrievalRequest) -> RetrievalOutcome:
+        if request.data_classification is DataClassification.RESTRICTED:
+            raise RagDependencyError(
+                "RESTRICTED_REMOTE_EVALUATION_FORBIDDEN",
+                "Restricted evaluation must execute inside the approved internal boundary",
+            )
         try:
             response = await self._client.post(
                 "/api/assistant/v1/knowledge/search",
@@ -87,6 +92,7 @@ class HttpRetrievalAdapter:
                     production_ready=bool(pipeline.get("productionReady", True)),
                     request_count=int(pipeline.get("requestCount", 0)),
                     input_tokens=int(pipeline.get("inputTokens", 0)),
+                    retrieval_config=dict(pipeline.get("retrievalConfig", {})),
                 ),
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:

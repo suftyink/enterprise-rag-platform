@@ -152,6 +152,7 @@ class EvaluationRoute:
     request_count: int
     input_tokens: int
     configuration_fingerprint: str
+    retrieval_config: dict[str, int | float | bool | str]
 
 
 @dataclass(frozen=True)
@@ -214,6 +215,7 @@ class EvaluationReport:
                         "requestCount": route.request_count,
                         "inputTokens": route.input_tokens,
                         "configurationFingerprint": route.configuration_fingerprint,
+                        "retrievalConfig": route.retrieval_config,
                     }
                     for route in self.metadata.routes
                 ],

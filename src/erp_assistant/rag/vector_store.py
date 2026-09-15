@@ -199,6 +199,8 @@ def get_vector_store() -> MilvusVectorStore:
 
 @lru_cache
 def get_vector_store_for(classification: DataClassification) -> MilvusVectorStore:
+    if classification is DataClassification.UNCLASSIFIED:
+        raise ValueError("Unclassified data has no vector index")
     settings = get_settings()
     embedding = get_embedding_provider_for(classification)
     collection = (

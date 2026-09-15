@@ -75,6 +75,7 @@ class RetrievalRun:
     production_ready: bool = True
     request_count: int = 0
     input_tokens: int = 0
+    retrieval_config: dict[str, int | float | bool | str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -102,6 +103,10 @@ class KnowledgeRetriever:
 
     async def retrieve(self, request: RetrievalRequest) -> RetrievalOutcome:
         request = self._normalize_request(request)
+        if request.data_classification is DataClassification.UNCLASSIFIED:
+            raise RagDependencyError(
+                "DATA_CLASSIFICATION_REQUIRED", "未分类知识不能进入检索 Provider"
+            )
         boundary = self._provider_boundary()
         if (
             request.data_classification is DataClassification.RESTRICTED
@@ -141,6 +146,7 @@ class KnowledgeRetriever:
                 ),
                 request_count=self._provider_usage().requests,
                 input_tokens=self._provider_usage().input_tokens,
+                retrieval_config=self.retrieval_config(),
             ),
         )
 
@@ -283,25 +289,28 @@ class KnowledgeRetriever:
 
     def configuration_fingerprint(self) -> str:
         payload = json.dumps(
-            {
-                "candidateMultiplier": self._settings.rag_candidate_multiplier,
-                "embeddingDimension": self._embedding.dimension,
-                "embeddingDeployment": str(getattr(self._embedding, "deployment", "legacy")),
-                "embeddingModel": self._embedding.model,
-                "maxCandidates": self._settings.rag_max_candidates,
-                "rerankModel": self._reranker.model,
-                "rerankDeployment": str(getattr(self._reranker, "deployment", "legacy")),
-                "rerankThreshold": self._settings.rag_rerank_threshold,
-                "retrieval": "dense-bm25-rrf-v1",
-                "rrfK": self._settings.rag_rrf_k,
-                "vectorIndex": self.index_identity,
-                "providerBoundary": self._provider_boundary().value,
-            },
+            self.retrieval_config(),
             ensure_ascii=True,
             separators=(",", ":"),
             sort_keys=True,
         ).encode("utf-8")
         return sha256(payload).hexdigest()
+
+    def retrieval_config(self) -> dict[str, int | float | bool | str]:
+        return {
+            "candidateMultiplier": self._settings.rag_candidate_multiplier,
+            "embeddingDimension": self._embedding.dimension,
+            "embeddingDeployment": str(getattr(self._embedding, "deployment", "legacy")),
+            "embeddingModel": self._embedding.model,
+            "maxCandidates": self._settings.rag_max_candidates,
+            "rerankModel": self._reranker.model,
+            "rerankDeployment": str(getattr(self._reranker, "deployment", "legacy")),
+            "rerankThreshold": self._settings.rag_rerank_threshold,
+            "retrieval": "dense-bm25-rrf-v1",
+            "rrfK": self._settings.rag_rrf_k,
+            "vectorIndex": self.index_identity,
+            "providerBoundary": self._provider_boundary().value,
+        }
 
     def _provider_boundary(self) -> ProviderBoundary:
         embedding = ProviderBoundary(

@@ -241,6 +241,14 @@ class DocumentIndexer:
 
                 if (
                     DataClassification(document.data_classification)
+                    is DataClassification.UNCLASSIFIED
+                ):
+                    raise DocumentValidationError(
+                        "DATA_CLASSIFICATION_REQUIRED",
+                        "未分类文档不能进入 Embedding Provider",
+                    )
+                if (
+                    DataClassification(document.data_classification)
                     is DataClassification.RESTRICTED
                     and ProviderBoundary(
                         getattr(self._embedding, "boundary", ProviderBoundary.INTERNAL)

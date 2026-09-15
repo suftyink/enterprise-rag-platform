@@ -55,6 +55,7 @@ class RetrievalProfile:
             self.version < 1
             or self.embedding_dimension < 1
             or not all(value.strip() for value in identities)
+            or self.data_classification is DataClassification.UNCLASSIFIED
         ):
             raise RagError("INVALID_RETRIEVAL_PROFILE", "检索 Profile 身份不完整")
         if (
@@ -184,6 +185,7 @@ class SqlRetrievalProfileStore:
             and route.production_ready
             and candidate.production_ready
             and route.configuration_fingerprint == candidate.configuration_fingerprint
+            and route.retrieval_config == candidate.retrieval_config
         )
         if not matches:
             raise RagError("PROFILE_EVIDENCE_MISMATCH", "评测证据与 staging Profile 不匹配")

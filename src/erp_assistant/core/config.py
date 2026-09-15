@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     restricted_rerank_version: str = ""
     retrieval_provider_timeout_seconds: float = 10.0
     restricted_knowledge_document_keys: str = ""
+    ordinary_knowledge_sha256: str = ""
+    restricted_knowledge_sha256: str = ""
+    restricted_provider_allowed_hosts: str = ""
     rag_enabled: bool = False
     milvus_uri: str = "http://localhost:19530"
     minio_endpoint: str = "http://localhost:9000"
@@ -80,6 +83,30 @@ class Settings(BaseSettings):
         return {
             value.strip().casefold()
             for value in self.restricted_knowledge_document_keys.split(",")
+            if value.strip()
+        }
+
+    @property
+    def ordinary_document_hashes(self) -> set[str]:
+        return {
+            value.strip().casefold()
+            for value in self.ordinary_knowledge_sha256.split(",")
+            if value.strip()
+        }
+
+    @property
+    def restricted_document_hashes(self) -> set[str]:
+        return {
+            value.strip().casefold()
+            for value in self.restricted_knowledge_sha256.split(",")
+            if value.strip()
+        }
+
+    @property
+    def restricted_provider_hosts(self) -> set[str]:
+        return {
+            value.strip().casefold()
+            for value in self.restricted_provider_allowed_hosts.split(",")
             if value.strip()
         }
 

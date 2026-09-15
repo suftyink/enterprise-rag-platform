@@ -360,6 +360,20 @@ async def test_search_filters_other_tenant_and_includes_global(
         "productionReady": False,
         "requestCount": 0,
         "inputTokens": 0,
+        "retrievalConfig": {
+            "candidateMultiplier": 4,
+            "embeddingDeployment": "local-fake",
+            "embeddingDimension": 256,
+            "embeddingModel": "fake-lexical-v1",
+            "maxCandidates": 80,
+            "providerBoundary": "INTERNAL",
+            "rerankDeployment": "local-fake",
+            "rerankModel": "fake-lexical-rerank-v2",
+            "rerankThreshold": 0.1,
+            "retrieval": "dense-bm25-rrf-v1",
+            "rrfK": 60,
+            "vectorIndex": "knowledge_chunks_hybrid_v2",
+        },
     }
     assert len(config_fingerprint) == 64
     assert response.json()["elapsedMs"] >= 0

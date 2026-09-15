@@ -2,6 +2,7 @@ from enum import StrEnum
 
 
 class DataClassification(StrEnum):
+    UNCLASSIFIED = "UNCLASSIFIED"
     ORDINARY = "ORDINARY"
     RESTRICTED = "RESTRICTED"
 

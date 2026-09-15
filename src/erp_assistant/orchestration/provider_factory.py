@@ -1,4 +1,5 @@
 from functools import lru_cache
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -18,6 +19,25 @@ from erp_assistant.orchestration.providers import (
 )
 from erp_assistant.rag.types import DataClassification
 
+_http_clients: list[httpx.AsyncClient] = []
+
+
+def _http_client(base_url: str, timeout: float) -> httpx.AsyncClient:
+    client = httpx.AsyncClient(base_url=base_url, timeout=timeout)
+    _http_clients.append(client)
+    return client
+
+
+async def close_retrieval_provider_clients() -> None:
+    clients = list(_http_clients)
+    _http_clients.clear()
+    for client in clients:
+        await client.aclose()
+    get_embedding_provider.cache_clear()
+    get_embedding_provider_for.cache_clear()
+    get_rerank_provider.cache_clear()
+    get_rerank_provider_for.cache_clear()
+
 
 @lru_cache
 def get_embedding_provider() -> EmbeddingProvider:
@@ -26,6 +46,8 @@ def get_embedding_provider() -> EmbeddingProvider:
 
 @lru_cache
 def get_embedding_provider_for(classification: DataClassification) -> EmbeddingProvider:
+    if classification is DataClassification.UNCLASSIFIED:
+        raise ValueError("Unclassified data has no retrieval provider")
     settings = get_settings()
     provider = settings.embedding_provider
     if provider == "fake":
@@ -33,11 +55,10 @@ def get_embedding_provider_for(classification: DataClassification) -> EmbeddingP
     if provider == "http":
         prefix = "restricted" if classification is DataClassification.RESTRICTED else "ordinary"
         base_url = str(getattr(settings, f"{prefix}_embedding_base_url"))
+        if classification is DataClassification.RESTRICTED:
+            base_url = _validated_restricted_url(base_url, settings.restricted_provider_hosts)
         return HttpEmbeddingProvider(
-            httpx.AsyncClient(
-                base_url=base_url,
-                timeout=settings.retrieval_provider_timeout_seconds,
-            ),
+            _http_client(base_url, settings.retrieval_provider_timeout_seconds),
             deployment=str(getattr(settings, f"{prefix}_embedding_deployment")),
             model=str(getattr(settings, f"{prefix}_embedding_model")),
             version=str(getattr(settings, f"{prefix}_embedding_version")),
@@ -59,6 +80,8 @@ def get_rerank_provider() -> RerankProvider:
 
 @lru_cache
 def get_rerank_provider_for(classification: DataClassification) -> RerankProvider:
+    if classification is DataClassification.UNCLASSIFIED:
+        raise ValueError("Unclassified data has no retrieval provider")
     settings = get_settings()
     provider = settings.rerank_provider
     if provider == "fake":
@@ -66,11 +89,10 @@ def get_rerank_provider_for(classification: DataClassification) -> RerankProvide
     if provider == "http":
         prefix = "restricted" if classification is DataClassification.RESTRICTED else "ordinary"
         base_url = str(getattr(settings, f"{prefix}_rerank_base_url"))
+        if classification is DataClassification.RESTRICTED:
+            base_url = _validated_restricted_url(base_url, settings.restricted_provider_hosts)
         return HttpRerankProvider(
-            httpx.AsyncClient(
-                base_url=base_url,
-                timeout=settings.retrieval_provider_timeout_seconds,
-            ),
+            _http_client(base_url, settings.retrieval_provider_timeout_seconds),
             deployment=str(getattr(settings, f"{prefix}_rerank_deployment")),
             model=str(getattr(settings, f"{prefix}_rerank_model")),
             version=str(getattr(settings, f"{prefix}_rerank_version")),
@@ -82,3 +104,10 @@ def get_rerank_provider_for(classification: DataClassification) -> RerankProvide
             api_key=str(getattr(settings, f"{prefix}_rerank_api_key")),
         )
     raise ValueError(f"Unsupported rerank provider: {provider}")
+
+
+def _validated_restricted_url(base_url: str, allowed_hosts: set[str]) -> str:
+    host = urlsplit(base_url).hostname
+    if host is None or host.casefold() not in allowed_hosts:
+        raise ValueError("Restricted provider endpoint is not in the trusted host registry")
+    return base_url

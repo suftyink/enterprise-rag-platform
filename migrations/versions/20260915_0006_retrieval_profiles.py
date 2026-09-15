@@ -18,7 +18,12 @@ depends_on: str | Sequence[str] | None = None
 def upgrade() -> None:
     op.add_column(
         "knowledge_document",
-        sa.Column("data_classification", sa.String(32), nullable=False, server_default="ORDINARY"),
+        sa.Column(
+            "data_classification",
+            sa.String(32),
+            nullable=False,
+            server_default="UNCLASSIFIED",
+        ),
     )
     op.add_column(
         "knowledge_chunk",
@@ -77,9 +82,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index(
-        "uq_retrieval_profile_active_classification", table_name="retrieval_profile"
-    )
+    op.drop_index("uq_retrieval_profile_active_classification", table_name="retrieval_profile")
     op.drop_index("ix_retrieval_profile_classification_status", table_name="retrieval_profile")
     op.drop_table("retrieval_profile")
     op.drop_column("knowledge_index_job", "retrieval_profile")

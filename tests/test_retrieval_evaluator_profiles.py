@@ -582,6 +582,37 @@ async def test_run_rejects_fake_provider_identity_as_a_production_profile(
 
 
 @pytest.mark.asyncio
+async def test_run_aggregates_safe_provider_usage_across_the_whole_evaluation(
+    tmp_path: Path,
+) -> None:
+    questions = ("usage query one", "usage query two")
+    dataset = write_dataset(
+        tmp_path / "usage.jsonl",
+        [
+            evaluation_case(
+                f"usage-{index}",
+                question,
+                expected_sources=[{"documentKey": "approved-sop", "pageStart": 1, "pageEnd": 1}],
+                expected_decision="MATCHED",
+                categories=["CHINESE_NATURAL_LANGUAGE"],
+            )
+            for index, question in enumerate(questions, start=1)
+        ],
+    )
+    first = outcome("approved-sop")
+    second = outcome("approved-sop")
+    outcomes = {
+        questions[0]: replace(first, run=replace(first.run, request_count=2, input_tokens=11)),
+        questions[1]: replace(second, run=replace(second.run, request_count=2, input_tokens=13)),
+    }
+
+    report = await RetrievalEvaluator(DeterministicRetriever(outcomes), environment()).run(dataset)
+
+    assert report.metadata.routes[0].request_count == 4
+    assert report.metadata.routes[0].input_tokens == 24
+
+
+@pytest.mark.asyncio
 async def test_run_rejects_query_model_that_does_not_match_index_dimension(
     tmp_path: Path,
     retrieval_session: AsyncSession,
@@ -696,6 +727,11 @@ def _passing_business_scenario() -> tuple[list[dict[str, object]], dict[str, Ret
                 rerank_model="semantic-rerank:v2",
                 rerank_deployment="cloud-rerank-prod",
                 provider_boundary=ProviderBoundary.CLOUD,
+                retrieval_config={
+                    "candidateCount": 40,
+                    "rrfK": 60,
+                    "rerankThreshold": 0.5,
+                },
             ),
         )
     return cases, outcomes

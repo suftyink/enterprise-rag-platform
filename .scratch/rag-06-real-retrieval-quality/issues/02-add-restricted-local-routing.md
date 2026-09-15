@@ -4,16 +4,16 @@
 
 **Blocked by:** 01 / 接入普通知识的真实 Embedding 与 Rerank.
 
-**Status:** resolved
+**Status:** claimed
 
 - [x] 文档和知识范围具有可执行的数据敏感级别。
-- [x] RESTRICTED 索引和查询只能选择批准的内网或本地 profile。
+- [ ] RESTRICTED 索引和查询只能选择批准的内网或本地 profile。
 - [x] 客户端不能覆盖数据分类或选择任意 Provider。
 - [x] 本地路由不可用时返回明确失败，不降级到云端。
 - [x] Recording Adapter 证明受限输入未到达云端调用。
 - [x] 日志和评测报告记录安全的路由身份但不记录正文。
 - [x] 普通知识的云端路径保持可用且隔离。
 
-## Answer
+## Comments
 
-数据分类由服务端文档策略产生；索引与评测检索均按分类走独立路由和集合，RESTRICTED 仅允许 INTERNAL，缺少或错配路由时在 Provider 调用前失败关闭。
+生产文档分类改由服务端受信内容哈希清单决定；索引与评测检索按分类走独立路由和集合，RESTRICTED 端点还必须命中独立内网主机注册表。仍待 Spec08 的可信身份/范围策略接入正式员工搜索入口，当前不会通过远程 HTTP 评测转发 RESTRICTED 问题。

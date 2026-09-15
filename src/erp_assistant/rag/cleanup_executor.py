@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from erp_assistant.infrastructure.object_storage import ObjectStorage
-from erp_assistant.models.knowledge import KnowledgeCleanupRequest
+from erp_assistant.models.knowledge import KnowledgeCleanupRequest, KnowledgeDocument
 from erp_assistant.rag.document_indexer import VectorWriter
 from erp_assistant.rag.knowledge_corpus import (
     SYSTEM_CORPUS_ACTOR,
@@ -16,7 +16,7 @@ from erp_assistant.rag.knowledge_corpus import (
     KnowledgeCorpus,
     LifecycleAction,
 )
-from erp_assistant.rag.types import CleanupStatus
+from erp_assistant.rag.types import CleanupStatus, DataClassification
 
 
 class CleanupDecision(StrEnum):
@@ -49,22 +49,25 @@ class KnowledgeCleanupExecutor:
         session_factory: async_sessionmaker[AsyncSession],
         storage: ObjectStorage,
         vectors: VectorWriter,
+        vectors_by_classification: dict[DataClassification, VectorWriter] | None = None,
         corpus: KnowledgeCorpus,
     ) -> None:
         self._sessions = session_factory
         self._storage = storage
         self._vectors = vectors
+        self._classified_vectors = dict(vectors_by_classification or {})
         self._corpus = corpus
 
     async def execute(self, document_id: UUID) -> CleanupOutcome:
         request = await self._claim(document_id)
         if request is None:
             return CleanupOutcome(document_id, CleanupDecision.SKIPPED, None)
+        vectors = await self._vector_writer(document_id)
         try:
             for artifact in request.artifacts:
                 if artifact["kind"] == "vector_document":
                     await asyncio.to_thread(
-                        self._vectors.delete_document,
+                        vectors.delete_document,
                         UUID(artifact["document_id"]),
                     )
                 elif artifact["kind"] == "object":
@@ -84,6 +87,23 @@ class KnowledgeCleanupExecutor:
                 pass
             raise CleanupRetryableError("知识产物清理失败，可安全重试") from exc
         return CleanupOutcome(document_id, CleanupDecision.COMPLETED, request.id)
+
+    async def _vector_writer(self, document_id: UUID) -> VectorWriter:
+        if not self._classified_vectors:
+            return self._vectors
+        async with self._sessions() as session:
+            classification = await session.scalar(
+                select(KnowledgeDocument.data_classification).where(
+                    KnowledgeDocument.id == document_id
+                )
+            )
+        if classification is None:
+            raise CleanupRetryableError("清理目标文档不存在")
+        try:
+            writer = self._classified_vectors[DataClassification(classification)]
+        except (KeyError, ValueError) as exc:
+            raise CleanupRetryableError("文档分类没有对应的向量清理路由") from exc
+        return writer
 
     async def _claim(self, document_id: UUID) -> KnowledgeCleanupRequest | None:
         async with self._sessions() as session:

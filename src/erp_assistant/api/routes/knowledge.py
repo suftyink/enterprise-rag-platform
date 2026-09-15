@@ -1,6 +1,7 @@
 import logging
 import re
 import unicodedata
+from hashlib import sha256
 from pathlib import Path
 from typing import Annotated
 from uuid import UUID
@@ -149,6 +150,28 @@ def _response(
     )
 
 
+def _classify_document(
+    content: bytes,
+    document_key: str,
+    settings: Settings,
+) -> DataClassification:
+    digest = sha256(content).hexdigest()
+    if digest in settings.restricted_document_hashes:
+        return DataClassification.RESTRICTED
+    if digest in settings.ordinary_document_hashes:
+        return DataClassification.ORDINARY
+    if settings.app_env.casefold() == "production":
+        raise RagError(
+            "DOCUMENT_CLASSIFICATION_REQUIRED",
+            "生产文档必须先在服务端受信分类清单中登记",
+        )
+    return (
+        DataClassification.RESTRICTED
+        if document_key.casefold() in settings.restricted_document_keys
+        else DataClassification.ORDINARY
+    )
+
+
 @router.post(
     "/knowledge/documents",
     response_model=KnowledgeDocumentResponse,
@@ -189,14 +212,12 @@ async def upload_document(
             title=(title or Path(filename).stem)[:255],
             original_filename=filename,
             media_type=media_type,
-            data_classification=(
-                DataClassification.RESTRICTED
-                if key.casefold() in settings.restricted_document_keys
-                else DataClassification.ORDINARY
-            ),
+            data_classification=_classify_document(content, key, settings),
         )
     except RagDependencyError as exc:
         raise _error(status.HTTP_503_SERVICE_UNAVAILABLE, exc.code, exc.message) from exc
+    except RagError as exc:
+        raise _error(status.HTTP_409_CONFLICT, exc.code, exc.message) from exc
     if result.duplicate:
         response.status_code = status.HTTP_200_OK
     return _response(result.document, result.job, duplicate=result.duplicate)
@@ -291,6 +312,7 @@ async def search_documents(
             productionReady=outcome.run.production_ready,
             requestCount=outcome.run.request_count,
             inputTokens=outcome.run.input_tokens,
+            retrievalConfig=outcome.run.retrieval_config,
         ),
         results=[
             KnowledgeSearchResult(

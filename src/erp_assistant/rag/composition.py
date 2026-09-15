@@ -30,7 +30,10 @@ def get_document_indexer() -> CorpusProcessor:
         SessionFactory,
         {
             classification: partial(get_document_indexer_for, classification)
-            for classification in DataClassification
+            for classification in (
+                DataClassification.ORDINARY,
+                DataClassification.RESTRICTED,
+            )
         },
     )
 
@@ -47,5 +50,12 @@ def get_cleanup_executor() -> KnowledgeCleanupExecutor:
         session_factory=SessionFactory,
         storage=get_object_storage(),
         vectors=get_vector_store(),
+        vectors_by_classification={
+            classification: get_vector_store_for(classification)
+            for classification in (
+                DataClassification.ORDINARY,
+                DataClassification.RESTRICTED,
+            )
+        },
         corpus=get_knowledge_corpus(),
     )

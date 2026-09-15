@@ -108,6 +108,12 @@ class RetrievalEvaluator:
             observed.append(ObservedCase(case=case, outcome=outcome))
             if run_identity is None:
                 run_identities[case.data_classification] = outcome.run
+            else:
+                run_identities[case.data_classification] = replace(
+                    run_identity,
+                    request_count=run_identity.request_count + outcome.run.request_count,
+                    input_tokens=run_identity.input_tokens + outcome.run.input_tokens,
+                )
 
         for classification, run in run_identities.items():
             if not run.production_ready:
@@ -163,6 +169,7 @@ class RetrievalEvaluator:
                         request_count=run.request_count,
                         input_tokens=run.input_tokens,
                         configuration_fingerprint=run.config_fingerprint,
+                        retrieval_config=dict(run.retrieval_config),
                     )
                     for classification, run in sorted(
                         run_identities.items(), key=lambda item: item[0].value
@@ -225,6 +232,7 @@ def _identity(run: RetrievalRun) -> tuple[object, ...]:
         run.rerank_deployment,
         run.provider_boundary,
         run.production_ready,
+        tuple(sorted(run.retrieval_config.items())),
     )
 
 
@@ -259,6 +267,7 @@ def _comparison_key(
                     "rerankDeployment": run.rerank_deployment,
                     "rerankModel": run.rerank_model,
                     "retrievalPipeline": run.retrieval,
+                    "retrievalConfig": run.retrieval_config,
                 }
                 for classification, run in sorted(runs.items(), key=lambda item: item[0].value)
             },

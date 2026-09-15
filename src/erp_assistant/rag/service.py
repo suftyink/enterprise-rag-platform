@@ -67,6 +67,11 @@ async def create_document(
         )
     )
     if duplicate is not None:
+        if duplicate.data_classification != data_classification.value:
+            raise RagError(
+                "DOCUMENT_CLASSIFICATION_CHANGED",
+                "文档分类策略已变化，必须先完成受审计的重新分类和索引重建",
+            )
         return DocumentCreateResult(
             document=duplicate,
             job=await latest_job(session, duplicate.id),
