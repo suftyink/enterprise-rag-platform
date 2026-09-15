@@ -62,6 +62,7 @@ class KnowledgeDocument(Base):
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
     media_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    data_classification: Mapped[str] = mapped_column(String(32), nullable=False, default="ORDINARY")
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
     sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     object_key: Mapped[str] = mapped_column(String(512), unique=True, nullable=False)
@@ -122,6 +123,8 @@ class KnowledgeChunk(Base):
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     char_count: Mapped[int] = mapped_column(Integer, nullable=False)
     embedding_model: Mapped[str] = mapped_column(String(64), nullable=False)
+    embedding_dimension: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    retrieval_profile: Mapped[str] = mapped_column(String(128), nullable=False, default="legacy")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     document: Mapped[KnowledgeDocument] = relationship(back_populates="chunks")
 
@@ -142,6 +145,9 @@ class KnowledgeIndexJob(Base):
     warnings: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     pipeline_revision: Mapped[str | None] = mapped_column(String(64))
     parser_version: Mapped[str | None] = mapped_column(String(128))
+    embedding_deployment: Mapped[str | None] = mapped_column(String(128))
+    embedding_dimension: Mapped[int | None] = mapped_column(Integer)
+    retrieval_profile: Mapped[str | None] = mapped_column(String(128))
     chunking_version: Mapped[str | None] = mapped_column(String(64))
     quality_signals: Mapped[dict[str, int | float | str]] = mapped_column(
         JSON, nullable=False, default=dict
@@ -194,6 +200,49 @@ class KnowledgeLifecycleEvent(Base):
     document_version: Mapped[int] = mapped_column(Integer, nullable=False)
     revision: Mapped[int] = mapped_column(Integer, nullable=False)
     result: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class RetrievalProfileRecord(Base):
+    __tablename__ = "retrieval_profile"
+    __table_args__ = (
+        UniqueConstraint("profile_key", "version", name="uq_retrieval_profile_version"),
+        Index("ix_retrieval_profile_classification_status", "data_classification", "status"),
+        Index(
+            "uq_retrieval_profile_active_classification",
+            "data_classification",
+            unique=True,
+            postgresql_where=text("status = 'ACTIVE'"),
+            sqlite_where=text("status = 'ACTIVE'"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    profile_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    data_classification: Mapped[str] = mapped_column(String(32), nullable=False)
+    provider_boundary: Mapped[str] = mapped_column(String(32), nullable=False)
+    embedding_deployment: Mapped[str] = mapped_column(String(128), nullable=False)
+    embedding_model: Mapped[str] = mapped_column(String(128), nullable=False)
+    embedding_dimension: Mapped[int] = mapped_column(Integer, nullable=False)
+    rerank_deployment: Mapped[str] = mapped_column(String(128), nullable=False)
+    rerank_model: Mapped[str] = mapped_column(String(128), nullable=False)
+    index_identity: Mapped[str] = mapped_column(String(255), nullable=False)
+    parser_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    chunk_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    retrieval_config: Mapped[dict[str, int | float | bool | str]] = mapped_column(
+        JSON, nullable=False
+    )
+    configuration_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    production_ready: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="STAGING")
+    dataset_hash: Mapped[str | None] = mapped_column(String(64))
+    comparison_key: Mapped[str | None] = mapped_column(String(64))
+    previous_profile_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("retrieval_profile.id", ondelete="SET NULL")
+    )
+    evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 

@@ -7,6 +7,7 @@ from erp_assistant.models.knowledge import (
     KnowledgeDocument,
     KnowledgeIndexJob,
     KnowledgeLifecycleEvent,
+    RetrievalProfileRecord,
 )
 from erp_assistant.models.task import AiTask, AiTaskMessage
 
@@ -19,4 +20,5 @@ __all__ = [
     "KnowledgeDocument",
     "KnowledgeIndexJob",
     "KnowledgeLifecycleEvent",
+    "RetrievalProfileRecord",
 ]

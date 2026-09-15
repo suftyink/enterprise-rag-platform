@@ -1,7 +1,7 @@
 # Spec 06：接入真实检索模型并达到质量基线
 
 Type: spec
-Status: ready-for-agent
+Status: resolved
 Blocked by: rag-02-retrieval-evaluation, rag-05-multiformat-ingestion
 Primary test seam: `RetrievalEvaluator.run()`
 

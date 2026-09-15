@@ -1,15 +1,16 @@
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Protocol
 
+from erp_assistant.orchestration.providers import ProviderBoundary
 from erp_assistant.rag.retriever import (
     ActorContext,
     RetrievalOutcome,
     RetrievalRequest,
 )
-from erp_assistant.rag.types import SearchDecision
+from erp_assistant.rag.types import DataClassification, SearchDecision
 
 
 class EvaluationCategory(StrEnum):
@@ -58,6 +59,7 @@ class EvaluationCase:
     forbidden_document_keys: frozenset[str]
     provenance: DatasetProvenance
     reviewed: bool
+    data_classification: DataClassification
 
 
 @dataclass(frozen=True)
@@ -78,10 +80,33 @@ class EvaluationEnvironment:
     index_identity: str
     parser_version: str
     chunk_version: str
+    thresholds: "QualityThresholds" = field(default_factory=lambda: QualityThresholds())
 
     def __post_init__(self) -> None:
-        if not all(value.strip() for value in vars(self).values()):
+        if not all(
+            value.strip()
+            for value in (self.index_identity, self.parser_version, self.chunk_version)
+        ):
             raise ValueError("Evaluation environment identities must not be empty")
+
+
+@dataclass(frozen=True)
+class QualityThresholds:
+    recall_at_5: float = 0.90
+    mrr_at_5: float = 0.80
+    refusal_accuracy: float = 0.90
+    maximum_tenant_leakage: int = 0
+    latency_p95_ms: float = 1_500.0
+
+    def __post_init__(self) -> None:
+        if (
+            not 0 <= self.recall_at_5 <= 1
+            or not 0 <= self.mrr_at_5 <= 1
+            or not 0 <= self.refusal_accuracy <= 1
+            or self.maximum_tenant_leakage < 0
+            or self.latency_p95_ms <= 0
+        ):
+            raise ValueError("Evaluation quality thresholds are invalid")
 
 
 @dataclass(frozen=True)
@@ -111,6 +136,22 @@ class EvaluationMetadata:
     comparison_key: str
     executed_at: str
     elapsed_ms: float
+    routes: tuple["EvaluationRoute", ...] = ()
+
+
+@dataclass(frozen=True)
+class EvaluationRoute:
+    data_classification: DataClassification
+    embedding_model: str
+    embedding_deployment: str
+    embedding_dimension: int
+    rerank_model: str
+    rerank_deployment: str
+    provider_boundary: ProviderBoundary
+    production_ready: bool
+    request_count: int
+    input_tokens: int
+    configuration_fingerprint: str
 
 
 @dataclass(frozen=True)
@@ -118,6 +159,13 @@ class EvaluationFailure:
     case_id: str
     code: str
     kind: EvaluationFailureKind
+
+
+@dataclass(frozen=True)
+class EvaluationActivation:
+    profile_id: str
+    previous_profile_id: str | None
+    status: str
 
 
 @dataclass(frozen=True)
@@ -135,6 +183,7 @@ class EvaluationReport:
     failures: tuple[EvaluationFailure, ...]
     category_metrics: dict[str, EvaluationMetrics]
     gate: QualityGate
+    activation: EvaluationActivation | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -152,6 +201,22 @@ class EvaluationReport:
                 "rerankModel": self.metadata.rerank_model,
                 "configurationFingerprint": self.metadata.configuration_fingerprint,
                 "comparisonKey": self.metadata.comparison_key,
+                "routes": [
+                    {
+                        "dataClassification": route.data_classification,
+                        "embeddingModel": route.embedding_model,
+                        "embeddingDeployment": route.embedding_deployment,
+                        "embeddingDimension": route.embedding_dimension,
+                        "rerankModel": route.rerank_model,
+                        "rerankDeployment": route.rerank_deployment,
+                        "providerBoundary": route.provider_boundary,
+                        "productionReady": route.production_ready,
+                        "requestCount": route.request_count,
+                        "inputTokens": route.input_tokens,
+                        "configurationFingerprint": route.configuration_fingerprint,
+                    }
+                    for route in self.metadata.routes
+                ],
             },
             "metrics": _metrics_dict(self.metrics),
             "categoryMetrics": {
@@ -168,6 +233,15 @@ class EvaluationReport:
                 "frameworkComplete": self.gate.framework_complete,
                 "reasons": list(self.gate.reasons),
             },
+            "activation": (
+                {
+                    "profileId": self.activation.profile_id,
+                    "previousProfileId": self.activation.previous_profile_id,
+                    "status": self.activation.status,
+                }
+                if self.activation
+                else None
+            ),
         }
 
     def write(self, path: Path) -> None:

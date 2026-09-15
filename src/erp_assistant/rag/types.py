@@ -1,6 +1,11 @@
 from enum import StrEnum
 
 
+class DataClassification(StrEnum):
+    ORDINARY = "ORDINARY"
+    RESTRICTED = "RESTRICTED"
+
+
 class KnowledgeScope(StrEnum):
     TENANT = "TENANT"
     GLOBAL = "GLOBAL"

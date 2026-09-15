@@ -2,7 +2,13 @@ import math
 import re
 from hashlib import sha256
 
-from erp_assistant.orchestration.providers import ChatMessage, ChatResult, RankedDocument
+from erp_assistant.orchestration.providers import (
+    ChatMessage,
+    ChatResult,
+    ProviderBoundary,
+    ProviderUsage,
+    RankedDocument,
+)
 
 
 class FakeChatProvider:
@@ -16,6 +22,10 @@ class FakeEmbeddingProvider:
 
     dimension = 256
     model = "fake-lexical-v1"
+    deployment = "local-fake"
+    boundary = ProviderBoundary.INTERNAL
+    production_ready = False
+    usage = ProviderUsage()
 
     @staticmethod
     def features(value: str) -> list[str]:
@@ -42,6 +52,10 @@ class FakeEmbeddingProvider:
 
 class FakeRerankProvider:
     model = "fake-lexical-rerank-v2"
+    deployment = "local-fake"
+    boundary = ProviderBoundary.INTERNAL
+    production_ready = False
+    usage = ProviderUsage()
 
     async def rerank(self, query: str, documents: list[str]) -> list[RankedDocument]:
         query_terms = set(FakeEmbeddingProvider.features(query))

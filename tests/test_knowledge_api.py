@@ -353,6 +353,13 @@ async def test_search_filters_other_tenant_and_includes_global(
         "embeddingModel": "fake-lexical-v1",
         "rerankModel": "fake-lexical-rerank-v2",
         "threshold": 0.1,
+        "embeddingDeployment": "local-fake",
+        "embeddingDimension": 256,
+        "rerankDeployment": "local-fake",
+        "providerBoundary": "INTERNAL",
+        "productionReady": False,
+        "requestCount": 0,
+        "inputTokens": 0,
     }
     assert len(config_fingerprint) == 64
     assert response.json()["elapsedMs"] >= 0

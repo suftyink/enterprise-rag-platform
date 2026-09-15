@@ -13,10 +13,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from erp_assistant.core.config import Settings
 from erp_assistant.models.knowledge import KnowledgeChunk, KnowledgeDocument
-from erp_assistant.orchestration.providers import EmbeddingProvider, RerankProvider
+from erp_assistant.orchestration.providers import (
+    EmbeddingProvider,
+    ProviderBoundary,
+    ProviderUsage,
+    RerankProvider,
+)
 from erp_assistant.rag.errors import RagDependencyError, RagError
 from erp_assistant.rag.knowledge_eligibility import retrieval_eligibility_filters
-from erp_assistant.rag.types import KnowledgeScope, SearchDecision
+from erp_assistant.rag.types import DataClassification, KnowledgeScope, SearchDecision
 from erp_assistant.rag.vector_store import VectorStore
 
 
@@ -31,6 +36,7 @@ class RetrievalRequest:
     query: str
     actor: ActorContext
     evidence_limit: int = 5
+    data_classification: DataClassification = DataClassification.ORDINARY
 
 
 @dataclass(frozen=True)
@@ -62,6 +68,13 @@ class RetrievalRun:
     threshold: float
     config_fingerprint: str
     elapsed_ms: float
+    embedding_deployment: str = "legacy"
+    embedding_dimension: int = 0
+    rerank_deployment: str = "legacy"
+    provider_boundary: ProviderBoundary = ProviderBoundary.INTERNAL
+    production_ready: bool = True
+    request_count: int = 0
+    input_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -89,6 +102,19 @@ class KnowledgeRetriever:
 
     async def retrieve(self, request: RetrievalRequest) -> RetrievalOutcome:
         request = self._normalize_request(request)
+        boundary = self._provider_boundary()
+        if (
+            request.data_classification is DataClassification.RESTRICTED
+            and boundary is not ProviderBoundary.INTERNAL
+        ):
+            raise RagDependencyError(
+                "RESTRICTED_ROUTE_FORBIDDEN", "受限知识只能使用批准的内网或本地模型"
+            )
+        vector_dimension = getattr(self._vector_store, "dimension", self._embedding.dimension)
+        if vector_dimension != self._embedding.dimension:
+            raise RagDependencyError(
+                "INDEX_BINDING_MISMATCH", "查询 Embedding 维度与活动索引绑定不一致"
+            )
         trace_id = uuid4()
         started = perf_counter()
         evidence = await self._retrieve_evidence(request)
@@ -103,8 +129,18 @@ class KnowledgeRetriever:
                 embedding_model=self._embedding.model,
                 rerank_model=self._reranker.model,
                 threshold=self._settings.rag_rerank_threshold,
-                config_fingerprint=self._config_fingerprint(),
+                config_fingerprint=self.configuration_fingerprint(),
                 elapsed_ms=round((perf_counter() - started) * 1000, 2),
+                embedding_deployment=str(getattr(self._embedding, "deployment", "legacy")),
+                embedding_dimension=self._embedding.dimension,
+                rerank_deployment=str(getattr(self._reranker, "deployment", "legacy")),
+                provider_boundary=boundary,
+                production_ready=bool(
+                    getattr(self._embedding, "production_ready", True)
+                    and getattr(self._reranker, "production_ready", True)
+                ),
+                request_count=self._provider_usage().requests,
+                input_tokens=self._provider_usage().input_tokens,
             ),
         )
 
@@ -115,6 +151,8 @@ class KnowledgeRetriever:
         )
         try:
             vector = (await self._embedding.embed([request.query]))[0]
+        except RagDependencyError:
+            raise
         except Exception as exc:
             raise RagDependencyError("EMBEDDING_FAILED", "查询向量生成失败") from exc
         try:
@@ -126,6 +164,8 @@ class KnowledgeRetriever:
                 candidate_limit,
                 self._settings.rag_rrf_k,
             )
+        except RagDependencyError:
+            raise
         except Exception as exc:
             raise RagDependencyError("MILVUS_SEARCH_FAILED", "Milvus 检索失败") from exc
         if not hits:
@@ -139,6 +179,7 @@ class KnowledgeRetriever:
                     .where(
                         KnowledgeChunk.id.in_([hit.chunk_id for hit in hits]),
                         *retrieval_eligibility_filters(),
+                        KnowledgeDocument.data_classification == request.data_classification.value,
                         or_(
                             KnowledgeDocument.scope == KnowledgeScope.GLOBAL.value,
                             (
@@ -166,6 +207,8 @@ class KnowledgeRetriever:
                 request.query,
                 [chunk.content for chunk, _, _, _ in candidates],
             )
+        except RagDependencyError:
+            raise
         except Exception as exc:
             raise RagDependencyError("RERANK_FAILED", "候选结果重排失败") from exc
 
@@ -231,23 +274,50 @@ class KnowledgeRetriever:
             query=query,
             actor=ActorContext(subject_id=subject_id, tenant_id=tenant_id),
             evidence_limit=request.evidence_limit,
+            data_classification=request.data_classification,
         )
 
-    def _config_fingerprint(self) -> str:
+    @property
+    def index_identity(self) -> str:
+        return str(getattr(self._vector_store, "identity", self._settings.milvus_collection))
+
+    def configuration_fingerprint(self) -> str:
         payload = json.dumps(
             {
                 "candidateMultiplier": self._settings.rag_candidate_multiplier,
                 "embeddingDimension": self._embedding.dimension,
+                "embeddingDeployment": str(getattr(self._embedding, "deployment", "legacy")),
                 "embeddingModel": self._embedding.model,
                 "maxCandidates": self._settings.rag_max_candidates,
                 "rerankModel": self._reranker.model,
+                "rerankDeployment": str(getattr(self._reranker, "deployment", "legacy")),
                 "rerankThreshold": self._settings.rag_rerank_threshold,
                 "retrieval": "dense-bm25-rrf-v1",
                 "rrfK": self._settings.rag_rrf_k,
-                "vectorCollection": self._settings.milvus_collection,
+                "vectorIndex": self.index_identity,
+                "providerBoundary": self._provider_boundary().value,
             },
             ensure_ascii=True,
             separators=(",", ":"),
             sort_keys=True,
         ).encode("utf-8")
         return sha256(payload).hexdigest()
+
+    def _provider_boundary(self) -> ProviderBoundary:
+        embedding = ProviderBoundary(
+            getattr(self._embedding, "boundary", ProviderBoundary.INTERNAL)
+        )
+        reranker = ProviderBoundary(getattr(self._reranker, "boundary", embedding))
+        if embedding is not reranker:
+            raise RagDependencyError(
+                "PROFILE_BOUNDARY_MISMATCH", "Embedding 与 Rerank 不属于同一安全边界"
+            )
+        return embedding
+
+    def _provider_usage(self) -> ProviderUsage:
+        embedding = getattr(self._embedding, "usage", ProviderUsage())
+        reranker = getattr(self._reranker, "usage", ProviderUsage())
+        return ProviderUsage(
+            requests=embedding.requests + reranker.requests,
+            input_tokens=embedding.input_tokens + reranker.input_tokens,
+        )

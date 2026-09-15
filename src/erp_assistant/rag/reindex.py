@@ -8,7 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from erp_assistant.infrastructure.database import SessionFactory, engine
 from erp_assistant.models.knowledge import KnowledgeDocument
 from erp_assistant.rag.composition import get_document_indexer
-from erp_assistant.rag.document_indexer import DocumentIndexer, IndexDecision
+from erp_assistant.rag.document_indexer import IndexDecision
+from erp_assistant.rag.knowledge_corpus_contracts import CorpusProcessor
 from erp_assistant.rag.knowledge_eligibility import retrieval_eligibility_filters
 
 
@@ -23,7 +24,7 @@ class ReindexResult:
 
 
 async def reindex_active_documents(
-    indexer: DocumentIndexer,
+    indexer: CorpusProcessor,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> ReindexResult:
     async with session_factory() as session:

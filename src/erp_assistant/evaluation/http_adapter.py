@@ -3,6 +3,7 @@ from uuid import UUID
 
 import httpx
 
+from erp_assistant.orchestration.providers import ProviderBoundary
 from erp_assistant.rag.errors import RagDependencyError
 from erp_assistant.rag.retriever import (
     RetrievalEvidence,
@@ -77,6 +78,15 @@ class HttpRetrievalAdapter:
                     threshold=float(pipeline["threshold"]),
                     config_fingerprint=pipeline["configFingerprint"],
                     elapsed_ms=float(payload["elapsedMs"]),
+                    embedding_deployment=pipeline.get("embeddingDeployment", "legacy"),
+                    embedding_dimension=int(pipeline.get("embeddingDimension", 0)),
+                    rerank_deployment=pipeline.get("rerankDeployment", "legacy"),
+                    provider_boundary=ProviderBoundary(
+                        pipeline.get("providerBoundary", ProviderBoundary.INTERNAL)
+                    ),
+                    production_ready=bool(pipeline.get("productionReady", True)),
+                    request_count=int(pipeline.get("requestCount", 0)),
+                    input_tokens=int(pipeline.get("inputTokens", 0)),
                 ),
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:

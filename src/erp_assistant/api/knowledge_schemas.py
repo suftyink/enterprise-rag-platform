@@ -2,7 +2,9 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from erp_assistant.orchestration.providers import ProviderBoundary
 from erp_assistant.rag.types import (
+    DataClassification,
     DocumentStatus,
     IndexJobStatus,
     KnowledgeScope,
@@ -27,6 +29,7 @@ class KnowledgeDocumentResponse(BaseModel):
     duplicate: bool = False
     title: str
     media_type: str = Field(alias="mediaType")
+    data_classification: DataClassification = Field(alias="dataClassification")
     page_count: int | None = Field(default=None, alias="pageCount")
     block_count: int | None = Field(default=None, alias="blockCount")
     phase: str | None = None
@@ -86,6 +89,13 @@ class KnowledgeSearchPipeline(BaseModel):
     rerank_model: str = Field(alias="rerankModel")
     threshold: float
     config_fingerprint: str = Field(alias="configFingerprint")
+    embedding_deployment: str = Field(alias="embeddingDeployment")
+    embedding_dimension: int = Field(alias="embeddingDimension")
+    rerank_deployment: str = Field(alias="rerankDeployment")
+    provider_boundary: ProviderBoundary = Field(alias="providerBoundary")
+    production_ready: bool = Field(alias="productionReady")
+    request_count: int = Field(alias="requestCount")
+    input_tokens: int = Field(alias="inputTokens")
 
 
 class KnowledgeSearchResponse(BaseModel):

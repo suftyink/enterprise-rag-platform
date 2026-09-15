@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from erp_assistant.core.config import Settings
 from erp_assistant.infrastructure.object_storage import ObjectStorage
 from erp_assistant.models.knowledge import KnowledgeChunk, KnowledgeDocument, KnowledgeIndexJob
-from erp_assistant.orchestration.providers import EmbeddingProvider
+from erp_assistant.orchestration.providers import EmbeddingProvider, ProviderBoundary
 from erp_assistant.rag.chunker import (
     CHUNK_STRATEGY_VERSION,
     ChunkDraft,
@@ -26,7 +26,12 @@ from erp_assistant.rag.errors import DocumentValidationError, OcrRequiredError, 
 from erp_assistant.rag.knowledge_queries import latest_job
 from erp_assistant.rag.parsed_document import ParserLimits
 from erp_assistant.rag.pdf_parser import PdfParser
-from erp_assistant.rag.types import DocumentStatus, IndexJobStatus, PublicationStatus
+from erp_assistant.rag.types import (
+    DataClassification,
+    DocumentStatus,
+    IndexJobStatus,
+    PublicationStatus,
+)
 
 
 def utc_now() -> datetime:
@@ -184,6 +189,11 @@ class DocumentIndexer:
                             parser_version=self._parser.parser_version(document.media_type),
                             chunking_version=CHUNK_STRATEGY_VERSION,
                             quality_signals={},
+                            embedding_deployment=str(
+                                getattr(self._embedding, "deployment", "legacy")
+                            ),
+                            embedding_dimension=self._embedding.dimension,
+                            retrieval_profile=self.pipeline.revision,
                             warnings=[],
                             chunk_count=0,
                             source_hash=source_hash,
@@ -228,6 +238,19 @@ class DocumentIndexer:
             vector_dirty = False
             try:
                 await session.commit()
+
+                if (
+                    DataClassification(document.data_classification)
+                    is DataClassification.RESTRICTED
+                    and ProviderBoundary(
+                        getattr(self._embedding, "boundary", ProviderBoundary.INTERNAL)
+                    )
+                    is not ProviderBoundary.INTERNAL
+                ):
+                    raise DocumentValidationError(
+                        "RESTRICTED_ROUTE_FORBIDDEN",
+                        "受限文档只能发送到批准的内网或本地 Embedding",
+                    )
 
                 failure_code = "BLOB_READ_FAILED"
                 content = await asyncio.to_thread(self._storage.get_bytes, document.object_key)
@@ -712,6 +735,8 @@ class DocumentIndexer:
             content_hash=draft.content_hash,
             char_count=len(draft.content),
             embedding_model=self._embedding.model,
+            embedding_dimension=self._embedding.dimension,
+            retrieval_profile=self.pipeline.revision,
             heading_path=list(draft.heading_path),
             anchor=draft.anchor,
             block_kind=draft.block_kind.value,

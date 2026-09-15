@@ -12,12 +12,13 @@ from erp_assistant.evaluation.models import (
     RelevantSource,
 )
 from erp_assistant.rag.retriever import ActorContext
-from erp_assistant.rag.types import SearchDecision
+from erp_assistant.rag.types import DataClassification, SearchDecision
 
 _CASE_FIELDS = {
     "actor",
     "categories",
     "datasetVersion",
+    "dataClassification",
     "expectedDecision",
     "expectedSources",
     "forbiddenDocumentKeys",
@@ -78,7 +79,11 @@ def load_dataset(path: Path) -> EvaluationDataset:
 
 
 def _parse_case(value: Any, line_number: int) -> EvaluationCase:
-    if not isinstance(value, dict) or set(value) != _CASE_FIELDS:
+    if (
+        not isinstance(value, dict)
+        or not set(value).issubset(_CASE_FIELDS)
+        or not (_CASE_FIELDS - {"dataClassification"}).issubset(value)
+    ):
         raise _invalid("Invalid evaluation case fields", line_number)
     actor = value["actor"]
     if not isinstance(actor, dict) or set(actor) != {"subjectId", "tenantId"}:
@@ -114,13 +119,15 @@ def _parse_case(value: Any, line_number: int) -> EvaluationCase:
     try:
         provenance = DatasetProvenance(value["provenance"])
         expected_decision = SearchDecision(value["expectedDecision"])
+        data_classification = DataClassification(
+            value.get("dataClassification", DataClassification.ORDINARY.value)
+        )
         category_set = frozenset(EvaluationCategory(category) for category in categories)
         sources = tuple(_parse_source(source, line_number) for source in expected_sources)
     except (TypeError, ValueError) as exc:
         raise _invalid("Invalid evaluation labels", line_number) from exc
-    if (
-        len(category_set) != len(categories)
-        or any(not _is_bounded_text(key, 256) for key in forbidden_keys)
+    if len(category_set) != len(categories) or any(
+        not _is_bounded_text(key, 256) for key in forbidden_keys
     ):
         raise _invalid("Invalid evaluation labels", line_number)
 
@@ -137,10 +144,7 @@ def _parse_case(value: Any, line_number: int) -> EvaluationCase:
             (EvaluationCategory.NO_ANSWER in category_set)
             != (expected_decision == SearchDecision.INSUFFICIENT_KNOWLEDGE)
         )
-        or (
-            (EvaluationCategory.TENANT_ISOLATION in category_set)
-            != bool(forbidden_key_set)
-        )
+        or ((EvaluationCategory.TENANT_ISOLATION in category_set) != bool(forbidden_key_set))
     ):
         raise _invalid("Inconsistent evaluation labels", line_number)
     return EvaluationCase(
@@ -154,6 +158,7 @@ def _parse_case(value: Any, line_number: int) -> EvaluationCase:
         forbidden_document_keys=forbidden_key_set,
         provenance=provenance,
         reviewed=value["reviewed"],
+        data_classification=data_classification,
     )
 
 

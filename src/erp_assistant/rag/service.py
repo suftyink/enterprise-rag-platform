@@ -16,7 +16,12 @@ from erp_assistant.models.knowledge import (
 )
 from erp_assistant.rag.errors import RagDependencyError, RagError
 from erp_assistant.rag.knowledge_queries import latest_job
-from erp_assistant.rag.types import DocumentStatus, IndexJobStatus, KnowledgeScope
+from erp_assistant.rag.types import (
+    DataClassification,
+    DocumentStatus,
+    IndexJobStatus,
+    KnowledgeScope,
+)
 from erp_assistant.workers.dispatcher import DocumentDispatcher
 
 
@@ -49,6 +54,7 @@ async def create_document(
     title: str,
     original_filename: str,
     media_type: str,
+    data_classification: DataClassification = DataClassification.ORDINARY,
 ) -> DocumentCreateResult:
     owner = scope_id_for(scope, tenant_id)
     digest = sha256(content).hexdigest()
@@ -96,6 +102,7 @@ async def create_document(
         title=title,
         original_filename=original_filename,
         media_type=media_type,
+        data_classification=data_classification.value,
         size_bytes=len(content),
         sha256=digest,
         object_key=object_key,

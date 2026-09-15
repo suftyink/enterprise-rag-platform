@@ -1,5 +1,17 @@
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Protocol
+
+
+class ProviderBoundary(StrEnum):
+    CLOUD = "CLOUD"
+    INTERNAL = "INTERNAL"
+
+
+@dataclass(frozen=True)
+class ProviderUsage:
+    requests: int = 0
+    input_tokens: int = 0
 
 
 @dataclass(frozen=True)

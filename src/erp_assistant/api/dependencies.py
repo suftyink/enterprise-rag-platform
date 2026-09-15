@@ -10,6 +10,7 @@ from erp_assistant.orchestration.provider_factory import (
     get_rerank_provider,
 )
 from erp_assistant.orchestration.providers import EmbeddingProvider, RerankProvider
+from erp_assistant.rag.profile_bound_retriever import ProfileBoundRetriever
 from erp_assistant.rag.retriever import KnowledgeRetriever
 from erp_assistant.rag.vector_store import VectorStore, get_vector_store
 
@@ -20,11 +21,12 @@ def get_knowledge_retriever(
     embedding: Annotated[EmbeddingProvider, Depends(get_embedding_provider)],
     reranker: Annotated[RerankProvider, Depends(get_rerank_provider)],
     settings: Annotated[Settings, Depends(get_settings)],
-) -> KnowledgeRetriever:
-    return KnowledgeRetriever(
+) -> ProfileBoundRetriever:
+    retriever = KnowledgeRetriever(
         session=session,
         vector_store=vector_store,
         embedding=embedding,
         reranker=reranker,
         settings=settings,
     )
+    return ProfileBoundRetriever(session, retriever, settings)

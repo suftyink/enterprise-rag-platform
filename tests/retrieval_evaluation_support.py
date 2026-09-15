@@ -86,9 +86,11 @@ def evaluation_case(
     forbidden_document_keys: list[str] | None = None,
     provenance: str = "SYNTHETIC",
     reviewed: bool = False,
+    data_classification: str = "ORDINARY",
 ) -> dict[str, object]:
     return {
         "datasetVersion": "2026-09-15.1",
+        "dataClassification": data_classification,
         "id": case_id,
         "question": question,
         "actor": {"subjectId": "evaluation-user", "tenantId": "tenant-a"},
@@ -116,4 +118,8 @@ def environment(**changes: str) -> EvaluationEnvironment:
         "chunk_version": "page-aware-v1",
     }
     values.update(changes)
-    return EvaluationEnvironment(**values)
+    return EvaluationEnvironment(
+        index_identity=values["index_identity"],
+        parser_version=values["parser_version"],
+        chunk_version=values["chunk_version"],
+    )

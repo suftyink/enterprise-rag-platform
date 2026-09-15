@@ -43,13 +43,15 @@ from erp_assistant.rag.errors import (
 from erp_assistant.rag.knowledge_eligibility import is_retrieval_eligible
 from erp_assistant.rag.knowledge_queries import latest_job
 from erp_assistant.rag.pdf_parser import PypdfParser
-from erp_assistant.rag.retriever import ActorContext, KnowledgeRetriever, RetrievalRequest
+from erp_assistant.rag.profile_bound_retriever import ProfileBoundRetriever
+from erp_assistant.rag.retriever import ActorContext, RetrievalRequest
 from erp_assistant.rag.service import (
     accessible_document,
     create_document,
     retry_document,
 )
 from erp_assistant.rag.types import (
+    DataClassification,
     DocumentStatus,
     IndexJobStatus,
     KnowledgeScope,
@@ -129,6 +131,7 @@ def _response(
         duplicate=duplicate,
         title=document.title,
         mediaType=document.media_type,
+        dataClassification=DataClassification(document.data_classification),
         pageCount=document.page_count,
         blockCount=document.block_count,
         phase=job.phase if job else None,
@@ -186,6 +189,11 @@ async def upload_document(
             title=(title or Path(filename).stem)[:255],
             original_filename=filename,
             media_type=media_type,
+            data_classification=(
+                DataClassification.RESTRICTED
+                if key.casefold() in settings.restricted_document_keys
+                else DataClassification.ORDINARY
+            ),
         )
     except RagDependencyError as exc:
         raise _error(status.HTTP_503_SERVICE_UNAVAILABLE, exc.code, exc.message) from exc
@@ -239,7 +247,7 @@ async def retry_failed_document(
 async def search_documents(
     payload: KnowledgeSearchRequest,
     settings: Annotated[Settings, Depends(get_settings)],
-    retriever: Annotated[KnowledgeRetriever, Depends(get_knowledge_retriever)],
+    retriever: Annotated[ProfileBoundRetriever, Depends(get_knowledge_retriever)],
 ) -> KnowledgeSearchResponse:
     _require_rag(settings)
     try:
@@ -276,6 +284,13 @@ async def search_documents(
             rerankModel=outcome.run.rerank_model,
             threshold=outcome.run.threshold,
             configFingerprint=outcome.run.config_fingerprint,
+            embeddingDeployment=outcome.run.embedding_deployment,
+            embeddingDimension=outcome.run.embedding_dimension,
+            rerankDeployment=outcome.run.rerank_deployment,
+            providerBoundary=outcome.run.provider_boundary,
+            productionReady=outcome.run.production_ready,
+            requestCount=outcome.run.request_count,
+            inputTokens=outcome.run.input_tokens,
         ),
         results=[
             KnowledgeSearchResult(

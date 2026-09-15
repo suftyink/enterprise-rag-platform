@@ -9,6 +9,7 @@ from erp_assistant.evaluation.models import (
     GateDecision,
     ObservedCase,
     QualityGate,
+    QualityThresholds,
     RelevantSource,
 )
 from erp_assistant.rag.retriever import RetrievalEvidence
@@ -79,18 +80,25 @@ def build_gate(
     metrics: EvaluationMetrics,
     cases: tuple[EvaluationCase, ...],
     failures: list[EvaluationFailure],
+    thresholds: QualityThresholds | None = None,
 ) -> QualityGate:
+    thresholds = thresholds or QualityThresholds()
     failure_reasons: list[str] = []
     if failures:
         failure_reasons.append("EXECUTION_FAILURES")
-    if metrics.tenant_leakage_count != 0:
+    if metrics.tenant_leakage_count > thresholds.maximum_tenant_leakage:
         failure_reasons.append("TENANT_LEAKAGE")
-    if metrics.recall_at_5 is not None and metrics.recall_at_5 < 0.90:
+    if metrics.recall_at_5 is not None and metrics.recall_at_5 < thresholds.recall_at_5:
         failure_reasons.append("RECALL_AT_5_BELOW_THRESHOLD")
-    if metrics.mrr_at_5 is not None and metrics.mrr_at_5 < 0.80:
+    if metrics.mrr_at_5 is not None and metrics.mrr_at_5 < thresholds.mrr_at_5:
         failure_reasons.append("MRR_AT_5_BELOW_THRESHOLD")
-    if metrics.refusal_accuracy is not None and metrics.refusal_accuracy < 0.90:
+    if (
+        metrics.refusal_accuracy is not None
+        and metrics.refusal_accuracy < thresholds.refusal_accuracy
+    ):
         failure_reasons.append("REFUSAL_ACCURACY_BELOW_THRESHOLD")
+    if metrics.latency_p95_ms > thresholds.latency_p95_ms:
+        failure_reasons.append("LATENCY_P95_ABOVE_THRESHOLD")
     if failure_reasons:
         return QualityGate(
             decision=GateDecision.FAIL,

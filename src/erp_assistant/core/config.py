@@ -16,6 +16,30 @@ class Settings(BaseSettings):
     model_provider: str = "fake"
     embedding_provider: str = "fake"
     rerank_provider: str = "fake"
+    ordinary_embedding_base_url: str = ""
+    ordinary_embedding_api_key: str = ""
+    ordinary_embedding_deployment: str = ""
+    ordinary_embedding_model: str = ""
+    ordinary_embedding_version: str = ""
+    ordinary_embedding_dimension: int = 0
+    ordinary_rerank_base_url: str = ""
+    ordinary_rerank_api_key: str = ""
+    ordinary_rerank_deployment: str = ""
+    ordinary_rerank_model: str = ""
+    ordinary_rerank_version: str = ""
+    restricted_embedding_base_url: str = ""
+    restricted_embedding_api_key: str = ""
+    restricted_embedding_deployment: str = ""
+    restricted_embedding_model: str = ""
+    restricted_embedding_version: str = ""
+    restricted_embedding_dimension: int = 0
+    restricted_rerank_base_url: str = ""
+    restricted_rerank_api_key: str = ""
+    restricted_rerank_deployment: str = ""
+    restricted_rerank_model: str = ""
+    restricted_rerank_version: str = ""
+    retrieval_provider_timeout_seconds: float = 10.0
+    restricted_knowledge_document_keys: str = ""
     rag_enabled: bool = False
     milvus_uri: str = "http://localhost:19530"
     minio_endpoint: str = "http://localhost:9000"
@@ -23,6 +47,7 @@ class Settings(BaseSettings):
     minio_secret_key: str = "minioadmin"
     minio_bucket: str = "erp-knowledge"
     milvus_collection: str = "knowledge_chunks_hybrid_v2"
+    restricted_milvus_collection: str = "knowledge_chunks_restricted_v1"
     rag_rrf_k: int = 60
     rag_candidate_multiplier: int = 4
     rag_max_candidates: int = 80
@@ -47,6 +72,14 @@ class Settings(BaseSettings):
         return {
             value.strip()
             for value in self.global_knowledge_operator_ids.split(",")
+            if value.strip()
+        }
+
+    @property
+    def restricted_document_keys(self) -> set[str]:
+        return {
+            value.strip().casefold()
+            for value in self.restricted_knowledge_document_keys.split(",")
             if value.strip()
         }
 

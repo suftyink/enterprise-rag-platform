@@ -15,8 +15,9 @@ from pymilvus import (
 )
 
 from erp_assistant.core.config import get_settings
-from erp_assistant.orchestration.provider_factory import get_embedding_provider
+from erp_assistant.orchestration.provider_factory import get_embedding_provider_for
 from erp_assistant.rag.chunker import ChunkDraft
+from erp_assistant.rag.types import DataClassification
 
 
 @dataclass(frozen=True)
@@ -157,8 +158,7 @@ class MilvusVectorStore:
             tenant_scope = json.dumps("TENANT")
             tenant = json.dumps(tenant_id)
             expression = (
-                f'(scope == {global_scope}) or '
-                f'(scope == {tenant_scope} and scope_id == {tenant})'
+                f"(scope == {global_scope}) or (scope == {tenant_scope} and scope_id == {tenant})"
             )
             dense_request = AnnSearchRequest(
                 data=[vector],
@@ -194,10 +194,20 @@ class MilvusVectorStore:
 
 @lru_cache
 def get_vector_store() -> MilvusVectorStore:
+    return get_vector_store_for(DataClassification.ORDINARY)
+
+
+@lru_cache
+def get_vector_store_for(classification: DataClassification) -> MilvusVectorStore:
     settings = get_settings()
-    embedding = get_embedding_provider()
+    embedding = get_embedding_provider_for(classification)
+    collection = (
+        settings.restricted_milvus_collection
+        if classification is DataClassification.RESTRICTED
+        else settings.milvus_collection
+    )
     return MilvusVectorStore(
         uri=settings.milvus_uri,
-        collection=settings.milvus_collection,
+        collection=collection,
         dimension=embedding.dimension,
     )
