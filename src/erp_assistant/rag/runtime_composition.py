@@ -1,13 +1,17 @@
 from functools import lru_cache
 
-from erp_assistant.core.config import Settings, get_settings
+from erp_assistant.core.config import (
+    RetrievalRuntimeDeploymentSettings,
+    Settings,
+    get_settings,
+)
 from erp_assistant.orchestration.http_retrieval_providers import (
     HttpEmbeddingProvider,
     HttpRerankProvider,
 )
 from erp_assistant.orchestration.provider_factory import (
-    _validated_restricted_url,
     create_retrieval_http_client,
+    validate_restricted_provider_url,
 )
 from erp_assistant.orchestration.providers import ProviderBoundary, embedding_binding_fingerprint
 from erp_assistant.rag.runtime_registry import (
@@ -19,22 +23,12 @@ from erp_assistant.rag.vector_store import MilvusVectorStore
 
 
 def build_retrieval_runtime_registry(settings: Settings) -> RetrievalRuntimeRegistry:
+    _validate_runtime_deployments(settings)
     bindings: list[RetrievalRuntimeBinding] = []
     for deployment in settings.retrieval_runtime_deployments:
         classification = DataClassification(deployment.data_classification)
         boundary = ProviderBoundary(deployment.provider_boundary)
-        if (
-            classification is DataClassification.RESTRICTED
-            and boundary is not ProviderBoundary.INTERNAL
-        ):
-            raise ValueError("Restricted runtime deployment must use the internal boundary")
-        embedding_url = deployment.embedding.base_url
-        rerank_url = deployment.reranker.base_url
-        if classification is DataClassification.RESTRICTED:
-            embedding_url = _validated_restricted_url(
-                embedding_url, settings.restricted_provider_hosts
-            )
-            rerank_url = _validated_restricted_url(rerank_url, settings.restricted_provider_hosts)
+        embedding_url, rerank_url = _provider_urls(settings, deployment)
         embedding = HttpEmbeddingProvider(
             create_retrieval_http_client(
                 embedding_url, settings.retrieval_provider_timeout_seconds
@@ -62,14 +56,7 @@ def build_retrieval_runtime_registry(settings: Settings) -> RetrievalRuntimeRegi
             dimension=embedding.dimension,
             embedding_binding=embedding_binding_fingerprint(embedding),
         )
-        runtime_settings = settings.model_copy(
-            update={
-                "rag_rrf_k": deployment.rrf_k,
-                "rag_candidate_multiplier": deployment.candidate_multiplier,
-                "rag_max_candidates": deployment.max_candidates,
-                "rag_rerank_threshold": deployment.rerank_threshold,
-            }
-        )
+        runtime_settings = _runtime_settings(settings, deployment)
         bindings.append(
             RetrievalRuntimeBinding(
                 data_classification=classification,
@@ -77,9 +64,119 @@ def build_retrieval_runtime_registry(settings: Settings) -> RetrievalRuntimeRegi
                 embedding=embedding,
                 reranker=reranker,
                 settings=runtime_settings,
+                parser_version=deployment.parser_version,
+                chunk_version=deployment.chunk_version,
             )
         )
     return RetrievalRuntimeRegistry(bindings)
+
+
+def _validate_runtime_deployments(settings: Settings) -> None:
+    identities: set[tuple[object, ...]] = set()
+    index_snapshots: dict[tuple[str, str], tuple[object, ...]] = {}
+    for deployment in settings.retrieval_runtime_deployments:
+        classification = DataClassification(deployment.data_classification)
+        boundary = ProviderBoundary(deployment.provider_boundary)
+        if (
+            classification is DataClassification.RESTRICTED
+            and boundary is not ProviderBoundary.INTERNAL
+        ):
+            raise ValueError("Restricted runtime deployment must use the internal boundary")
+        if classification is DataClassification.RESTRICTED:
+            _provider_urls(settings, deployment)
+        runtime_settings = _runtime_settings(settings, deployment)
+        if (
+            runtime_settings.knowledge_chunk_max < runtime_settings.knowledge_chunk_target
+            or runtime_settings.knowledge_chunk_overlap
+            >= runtime_settings.knowledge_chunk_target
+        ):
+            raise ValueError("Runtime deployment chunk configuration is invalid")
+        identity = (
+            classification,
+            boundary,
+            deployment.parser_version,
+            deployment.chunk_version,
+            deployment.embedding.deployment,
+            deployment.embedding.model,
+            deployment.embedding.version,
+            deployment.embedding.dimension,
+            deployment.reranker.deployment,
+            deployment.reranker.model,
+            deployment.reranker.version,
+            deployment.vector_index.uri,
+            deployment.vector_index.collection,
+            deployment.rrf_k,
+            deployment.candidate_multiplier,
+            deployment.max_candidates,
+            deployment.rerank_threshold,
+            runtime_settings.knowledge_chunk_target,
+            runtime_settings.knowledge_chunk_max,
+            runtime_settings.knowledge_chunk_overlap,
+        )
+        if identity in identities:
+            raise ValueError("Duplicate retrieval runtime binding")
+        identities.add(identity)
+        index_key = (
+            deployment.vector_index.uri,
+            deployment.vector_index.collection,
+        )
+        snapshot_identity = (
+            boundary,
+            deployment.parser_version,
+            deployment.chunk_version,
+            deployment.embedding.deployment,
+            deployment.embedding.model,
+            deployment.embedding.version,
+            deployment.embedding.dimension,
+        )
+        existing_snapshot = index_snapshots.setdefault(index_key, snapshot_identity)
+        if existing_snapshot != snapshot_identity:
+            raise ValueError("Indexing changes require an independent vector collection")
+
+
+def _provider_urls(
+    settings: Settings,
+    deployment: RetrievalRuntimeDeploymentSettings,
+) -> tuple[str, str]:
+    embedding_url = str(deployment.embedding.base_url)
+    rerank_url = str(deployment.reranker.base_url)
+    if deployment.data_classification == DataClassification.RESTRICTED.value:
+        embedding_url = validate_restricted_provider_url(
+            embedding_url, settings.restricted_provider_hosts
+        )
+        rerank_url = validate_restricted_provider_url(
+            rerank_url, settings.restricted_provider_hosts
+        )
+    return embedding_url, rerank_url
+
+
+def _runtime_settings(
+    settings: Settings,
+    deployment: RetrievalRuntimeDeploymentSettings,
+) -> Settings:
+    return settings.model_copy(
+        update={
+            "rag_rrf_k": deployment.rrf_k,
+            "rag_candidate_multiplier": deployment.candidate_multiplier,
+            "rag_max_candidates": deployment.max_candidates,
+            "rag_rerank_threshold": deployment.rerank_threshold,
+            "knowledge_chunk_target": (
+                deployment.chunk_target
+                if deployment.chunk_target is not None
+                else settings.knowledge_chunk_target
+            ),
+            "knowledge_chunk_max": (
+                deployment.chunk_max
+                if deployment.chunk_max is not None
+                else settings.knowledge_chunk_max
+            ),
+            "knowledge_chunk_overlap": (
+                deployment.chunk_overlap
+                if deployment.chunk_overlap is not None
+                else settings.knowledge_chunk_overlap
+            ),
+        }
+    )
 
 
 @lru_cache

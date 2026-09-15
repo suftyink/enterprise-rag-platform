@@ -1,6 +1,6 @@
 import asyncio
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from hashlib import sha256
@@ -305,18 +305,22 @@ class DocumentIndexer:
                 failure_code = "DATABASE_WRITE_FAILED"
                 await self._commit_claimed(session, job_id, attempt, claim_token)
 
-                drafts = chunk_document(
-                    document.id,
-                    parsed,
-                    self._settings.knowledge_chunk_target,
-                    self._settings.knowledge_chunk_max,
-                    self._settings.knowledge_chunk_overlap,
-                )
+                drafts = [
+                    replace(draft, id=uuid5(draft.id, self._vectors.identity))
+                    for draft in chunk_document(
+                        document.id,
+                        parsed,
+                        self._settings.knowledge_chunk_target,
+                        self._settings.knowledge_chunk_max,
+                        self._settings.knowledge_chunk_overlap,
+                    )
+                ]
                 if not drafts:
                     raise DocumentValidationError("EMPTY_DOCUMENT", "文档未生成有效文本 Chunk")
                 if not was_active:
                     await session.execute(
                         delete(KnowledgeChunk).where(KnowledgeChunk.document_id == document.id)
+                        .where(KnowledgeChunk.index_identity == self._vectors.identity)
                     )
                     session.add_all([self._chunk_model(document, draft) for draft in drafts])
                 if not was_active:
@@ -353,6 +357,7 @@ class DocumentIndexer:
                 if was_active:
                     await session.execute(
                         delete(KnowledgeChunk).where(KnowledgeChunk.document_id == document.id)
+                        .where(KnowledgeChunk.index_identity == self._vectors.identity)
                     )
                     session.add_all([self._chunk_model(document, draft) for draft in drafts])
                 cleanup_ids: list[UUID] = []
@@ -749,6 +754,7 @@ class DocumentIndexer:
             embedding_model=self._embedding.model,
             embedding_deployment=str(getattr(self._embedding, "deployment", "legacy")),
             embedding_dimension=self._embedding.dimension,
+            index_identity=self._vectors.identity,
             retrieval_profile=self.pipeline.revision,
             heading_path=list(draft.heading_path),
             anchor=draft.anchor,

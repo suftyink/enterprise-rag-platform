@@ -71,7 +71,9 @@ def get_embedding_provider_for(classification: DataClassification) -> EmbeddingP
         if dimension < 1:
             raise ValueError("Embedding profile identity is invalid")
         if classification is DataClassification.RESTRICTED:
-            base_url = _validated_restricted_url(base_url, settings.restricted_provider_hosts)
+            base_url = validate_restricted_provider_url(
+                base_url, settings.restricted_provider_hosts
+            )
         return HttpEmbeddingProvider(
             _http_client(base_url, settings.retrieval_provider_timeout_seconds),
             deployment=deployment,
@@ -110,7 +112,9 @@ def get_rerank_provider_for(classification: DataClassification) -> RerankProvide
         if not all(value.strip() for value in (base_url, deployment, model, version)):
             raise ValueError("Rerank profile identity is invalid")
         if classification is DataClassification.RESTRICTED:
-            base_url = _validated_restricted_url(base_url, settings.restricted_provider_hosts)
+            base_url = validate_restricted_provider_url(
+                base_url, settings.restricted_provider_hosts
+            )
         return HttpRerankProvider(
             _http_client(base_url, settings.retrieval_provider_timeout_seconds),
             deployment=deployment,
@@ -126,7 +130,7 @@ def get_rerank_provider_for(classification: DataClassification) -> RerankProvide
     raise ValueError(f"Unsupported rerank provider: {provider}")
 
 
-def _validated_restricted_url(base_url: str, allowed_hosts: set[str]) -> str:
+def validate_restricted_provider_url(base_url: str, allowed_hosts: set[str]) -> str:
     host = urlsplit(base_url).hostname
     if host is None or host.casefold() not in allowed_hosts:
         raise ValueError("Restricted provider endpoint is not in the trusted host registry")

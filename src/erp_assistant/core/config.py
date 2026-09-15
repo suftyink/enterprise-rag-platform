@@ -1,14 +1,14 @@
 from functools import lru_cache
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, SecretStr, StringConstraints
+from pydantic import AnyHttpUrl, BaseModel, Field, SecretStr, StringConstraints
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 
 class EmbeddingDeploymentSettings(BaseModel):
-    base_url: NonEmptyStr
+    base_url: AnyHttpUrl
     api_key: SecretStr = SecretStr("")
     deployment: NonEmptyStr
     model: NonEmptyStr
@@ -17,7 +17,7 @@ class EmbeddingDeploymentSettings(BaseModel):
 
 
 class RerankDeploymentSettings(BaseModel):
-    base_url: NonEmptyStr
+    base_url: AnyHttpUrl
     api_key: SecretStr = SecretStr("")
     deployment: NonEmptyStr
     model: NonEmptyStr
@@ -32,6 +32,8 @@ class VectorIndexDeploymentSettings(BaseModel):
 class RetrievalRuntimeDeploymentSettings(BaseModel):
     data_classification: Literal["ORDINARY", "RESTRICTED"]
     provider_boundary: Literal["CLOUD", "INTERNAL"]
+    parser_version: NonEmptyStr
+    chunk_version: NonEmptyStr
     embedding: EmbeddingDeploymentSettings
     reranker: RerankDeploymentSettings
     vector_index: VectorIndexDeploymentSettings
@@ -39,6 +41,9 @@ class RetrievalRuntimeDeploymentSettings(BaseModel):
     candidate_multiplier: int = Field(default=4, gt=0)
     max_candidates: int = Field(default=80, ge=20)
     rerank_threshold: float = Field(default=0.10, ge=0, le=1)
+    chunk_target: int | None = Field(default=None, gt=0)
+    chunk_max: int | None = Field(default=None, gt=0)
+    chunk_overlap: int | None = Field(default=None, ge=0)
 
 
 class Settings(BaseSettings):
@@ -76,7 +81,7 @@ class Settings(BaseSettings):
     restricted_rerank_deployment: str = ""
     restricted_rerank_model: str = ""
     restricted_rerank_version: str = ""
-    retrieval_provider_timeout_seconds: float = 10.0
+    retrieval_provider_timeout_seconds: float = Field(default=10.0, gt=0)
     retrieval_runtime_deployments: list[RetrievalRuntimeDeploymentSettings] = Field(
         default_factory=list
     )

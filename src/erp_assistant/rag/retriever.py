@@ -199,6 +199,9 @@ class KnowledgeRetriever:
             self._settings.rag_max_candidates,
             max(20, request.evidence_limit * self._settings.rag_candidate_multiplier),
         )
+        index_filter = KnowledgeChunk.index_identity == self.index_identity
+        if self._settings.app_env.casefold() != "production":
+            index_filter = or_(index_filter, KnowledgeChunk.index_identity == "legacy")
         try:
             vector = (await self._embedding.embed([request.query]))[0]
         except RagDependencyError:
@@ -234,6 +237,7 @@ class KnowledgeRetriever:
                         KnowledgeChunk.embedding_deployment
                         == str(getattr(self._embedding, "deployment", "legacy")),
                         KnowledgeChunk.embedding_dimension == self._embedding.dimension,
+                        index_filter,
                         or_(
                             KnowledgeDocument.scope == KnowledgeScope.GLOBAL.value,
                             (

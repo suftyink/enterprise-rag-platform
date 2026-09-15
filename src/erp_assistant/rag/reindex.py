@@ -11,6 +11,7 @@ from erp_assistant.rag.composition import get_document_indexer
 from erp_assistant.rag.document_indexer import IndexDecision
 from erp_assistant.rag.knowledge_corpus_contracts import CorpusProcessor
 from erp_assistant.rag.knowledge_eligibility import retrieval_eligibility_filters
+from erp_assistant.rag.types import DataClassification
 
 
 @dataclass(frozen=True)
@@ -26,13 +27,18 @@ class ReindexResult:
 async def reindex_active_documents(
     indexer: CorpusProcessor,
     session_factory: async_sessionmaker[AsyncSession],
+    *,
+    data_classification: DataClassification | None = None,
 ) -> ReindexResult:
     async with session_factory() as session:
+        filters = list(retrieval_eligibility_filters())
+        if data_classification is not None:
+            filters.append(KnowledgeDocument.data_classification == data_classification.value)
         document_ids = list(
             (
                 await session.scalars(
                     select(KnowledgeDocument.id).where(
-                        *retrieval_eligibility_filters(),
+                        *filters,
                     )
                 )
             ).all()

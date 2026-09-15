@@ -29,8 +29,12 @@ class RetrievalRuntimeBinding:
     embedding: EmbeddingProvider
     reranker: RerankProvider
     settings: Settings
+    parser_version: str
+    chunk_version: str
 
     def __post_init__(self) -> None:
+        if not self.parser_version.strip() or not self.chunk_version.strip():
+            raise ValueError("Runtime binding parser and chunk versions are required")
         if self.data_classification is DataClassification.UNCLASSIFIED:
             raise ValueError("Unclassified data has no runtime binding")
         vector_dimension = getattr(self.vector_store, "dimension", self.embedding.dimension)
@@ -94,6 +98,8 @@ class RetrievalRuntimeBinding:
             == str(getattr(self.reranker, "deployment", "legacy"))
             and profile.rerank_model == self.reranker.model
             and profile.index_identity == self.vector_store.identity
+            and profile.parser_version == self.parser_version
+            and profile.chunk_version == self.chunk_version
             and profile.retrieval_config == self.retrieval_config
             and profile.configuration_fingerprint == self.configuration_fingerprint
             and profile.production_ready
@@ -129,13 +135,16 @@ class RetrievalRuntimeRegistry:
         profile: RetrievalProfileRecord,
         session: AsyncSession,
     ) -> KnowledgeRetriever:
+        return self.binding_for(profile).build(session)
+
+    def binding_for(self, profile: RetrievalProfileRecord) -> RetrievalRuntimeBinding:
         binding = self._bindings.get(self._profile_key(profile))
         if binding is None or not binding.matches(profile):
             raise RagDependencyError(
                 "ACTIVE_PROFILE_BINDING_UNAVAILABLE",
                 "活动 Profile 未注册为可解析的运行时绑定",
             )
-        return binding.build(session)
+        return binding
 
     @staticmethod
     def _profile_key(profile: RetrievalProfileRecord) -> tuple[str, str, str]:

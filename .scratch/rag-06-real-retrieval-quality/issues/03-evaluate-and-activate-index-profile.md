@@ -16,4 +16,4 @@
 
 ## Comments
 
-新增持久化 staging/active/rollback profile、固定数据集与完整质量门禁、证据新鲜度、检索参数逐项匹配、指纹重算和唯一活动记录保护；没有显式运行时绑定校验器时禁止写入 ACTIVE，生产查询只接受活动 profile 指纹。受信 runtime registry 可预注册多套完整模型、索引和参数绑定，查询按数据库 ACTIVE 记录解析，切换和直接前序回滚无需重启；未注册或绑定不一致时失败关闭。仍需在真实 staging 语料和独立索引上执行正式评测。
+新增持久化 staging/active/rollback profile、固定数据集与完整质量门禁、证据新鲜度、检索参数逐项匹配、指纹重算和唯一活动记录保护；没有显式运行时绑定校验器时禁止写入 ACTIVE，生产查询只接受活动 profile 指纹。受信 runtime registry 可预注册多套完整模型、索引、Parser、Chunk 和参数绑定，查询按数据库 ACTIVE 记录解析，切换和直接前序回滚无需重启；未注册或绑定不一致时失败关闭。SQL Chunk 按索引快照共存，生产查询精确过滤活动索引；本地评测 CLI 可用 `--build-staging-index --candidate-profile-id <UUID>` 先构建对应分类的独立快照，再经过完整门禁原子激活。仍需在真实 staging 语料和独立索引上执行正式评测。

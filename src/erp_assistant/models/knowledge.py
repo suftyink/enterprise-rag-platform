@@ -101,7 +101,12 @@ class KnowledgeDocument(Base):
 class KnowledgeChunk(Base):
     __tablename__ = "knowledge_chunk"
     __table_args__ = (
-        UniqueConstraint("document_id", "chunk_index", name="uq_knowledge_chunk_position"),
+        UniqueConstraint(
+            "document_id",
+            "index_identity",
+            "chunk_index",
+            name="uq_knowledge_chunk_position",
+        ),
         Index("ix_knowledge_chunk_scope", "scope", "scope_id"),
         Index("ix_knowledge_chunk_document", "document_id"),
     )
@@ -127,6 +132,7 @@ class KnowledgeChunk(Base):
     embedding_model: Mapped[str] = mapped_column(String(64), nullable=False)
     embedding_deployment: Mapped[str] = mapped_column(String(128), nullable=False, default="legacy")
     embedding_dimension: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    index_identity: Mapped[str] = mapped_column(String(255), nullable=False, default="legacy")
     retrieval_profile: Mapped[str] = mapped_column(String(128), nullable=False, default="legacy")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     document: Mapped[KnowledgeDocument] = relationship(back_populates="chunks")

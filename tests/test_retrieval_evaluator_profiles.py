@@ -168,6 +168,7 @@ async def retrieval_session() -> AsyncIterator[AsyncSession]:
                 embedding_model="semantic-embed:v1",
                 embedding_deployment="cloud-embedding-prod",
                 embedding_dimension=3,
+                index_identity="staging-index-v1",
                 heading_path=[],
                 block_kind="PARAGRAPH",
                 source_locator={"pageStart": 1, "pageEnd": 1},
@@ -1006,6 +1007,28 @@ async def test_run_follows_atomic_active_binding_switch_and_rollback(
 ) -> None:
     first_chunk = await retrieval_session.scalar(select(KnowledgeChunk))
     assert first_chunk is not None
+    second_chunk = KnowledgeChunk(
+        id=uuid4(),
+        document_id=first_chunk.document_id,
+        scope=first_chunk.scope,
+        scope_id=first_chunk.scope_id,
+        version=first_chunk.version,
+        chunk_index=first_chunk.chunk_index,
+        page_start=first_chunk.page_start,
+        page_end=first_chunk.page_end,
+        content=first_chunk.content,
+        content_hash=first_chunk.content_hash,
+        char_count=first_chunk.char_count,
+        embedding_model=first_chunk.embedding_model,
+        embedding_deployment=first_chunk.embedding_deployment,
+        embedding_dimension=first_chunk.embedding_dimension,
+        index_identity="staging-index-v2",
+        heading_path=[],
+        block_kind="PARAGRAPH",
+        source_locator={"pageStart": 1, "pageEnd": 1},
+    )
+    retrieval_session.add(second_chunk)
+    await retrieval_session.flush()
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/embeddings":
@@ -1049,11 +1072,13 @@ async def test_run_follows_atomic_active_binding_switch_and_rollback(
                     boundary=ProviderBoundary.CLOUD,
                 ),
                 settings=settings,
+                parser_version="parser-v1",
+                chunk_version="chunk-v1",
             )
 
         first_store = OneHitVectorStore(first_chunk.id)
         first_store.identity = "staging-index-v1"
-        second_store = OneHitVectorStore(first_chunk.id)
+        second_store = OneHitVectorStore(second_chunk.id)
         second_store.identity = "staging-index-v2"
         first_binding = binding(
             rerank_version="v1",

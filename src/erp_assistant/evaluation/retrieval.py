@@ -28,8 +28,9 @@ from erp_assistant.evaluation.models import (
     ObservedCase,
     Retriever,
 )
-from erp_assistant.evaluation.profiles import ProfileActivator
+from erp_assistant.evaluation.profiles import ProfileActivator, SqlRetrievalProfileStore
 from erp_assistant.infrastructure.database import SessionFactory
+from erp_assistant.models.knowledge import RetrievalProfileRecord
 from erp_assistant.orchestration.provider_factory import (
     get_embedding_provider_for,
     get_rerank_provider_for,
@@ -37,6 +38,9 @@ from erp_assistant.orchestration.provider_factory import (
 from erp_assistant.rag.classified_retriever import ClassifiedRetrieverRouter
 from erp_assistant.rag.errors import RagDependencyError, RagError
 from erp_assistant.rag.retriever import KnowledgeRetriever, RetrievalRequest, RetrievalRun
+from erp_assistant.rag.runtime_composition import get_retrieval_runtime_registry
+from erp_assistant.rag.runtime_registry import RetrievalRuntimeRegistry
+from erp_assistant.rag.staging_index import build_staging_index
 from erp_assistant.rag.types import DataClassification
 from erp_assistant.rag.vector_store import get_vector_store_for
 
@@ -46,6 +50,7 @@ __all__ = [
     "GateDecision",
     "HttpRetrievalAdapter",
     "RetrievalEvaluator",
+    "evaluate_candidate_profile",
 ]
 
 
@@ -281,6 +286,18 @@ def _comparison_key(
 
 async def _run_from_cli(args: argparse.Namespace) -> EvaluationReport:
     settings = get_settings()
+    candidate_profile_id = getattr(args, "candidate_profile_id", None)
+    if candidate_profile_id is not None:
+        if args.base_url:
+            raise ValueError("Candidate profile activation is only available in local mode")
+        registry = get_retrieval_runtime_registry()
+        if getattr(args, "build_staging_index", False):
+            await build_staging_index(candidate_profile_id, registry)
+        return await evaluate_candidate_profile(
+            args.dataset,
+            candidate_profile_id,
+            registry,
+        )
     index_identity = args.index_identity or settings.milvus_collection
     vector_stores = None
     classifications: set[DataClassification] = set()
@@ -329,6 +346,39 @@ async def _run_from_cli(args: argparse.Namespace) -> EvaluationReport:
         return await RetrievalEvaluator(retriever, environment).run(args.dataset)
 
 
+async def evaluate_candidate_profile(
+    dataset: Path,
+    profile_id: UUID,
+    registry: RetrievalRuntimeRegistry,
+) -> EvaluationReport:
+    async with SessionFactory() as session:
+        candidate = await session.get(RetrievalProfileRecord, profile_id)
+        if candidate is None:
+            raise RagError("PROFILE_NOT_FOUND", "staging Profile 不存在")
+        try:
+            classification = DataClassification(candidate.data_classification)
+        except ValueError as exc:
+            raise RagError("INVALID_RETRIEVAL_PROFILE", "检索 Profile 数据分类无效") from exc
+        retriever = ClassifiedRetrieverRouter(
+            {classification: registry.resolve(candidate, session)}
+        )
+        environment = EvaluationEnvironment(
+            index_identity=candidate.index_identity,
+            parser_version=candidate.parser_version,
+            chunk_version=candidate.chunk_version,
+        )
+        activator = SqlRetrievalProfileStore(
+            SessionFactory,
+            runtime_binding_validator=registry.can_resolve,
+        )
+        return await RetrievalEvaluator(
+            retriever,
+            environment,
+            activator=activator,
+            candidate_profile_id=profile_id,
+        ).run(dataset)
+
+
 async def _main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate the retrieval quality baseline")
     parser.add_argument("--dataset", required=True, type=Path)
@@ -337,7 +387,11 @@ async def _main() -> None:
     parser.add_argument("--index-identity")
     parser.add_argument("--parser-version", default="pdf-parser-v1")
     parser.add_argument("--chunk-version")
+    parser.add_argument("--candidate-profile-id", type=UUID)
+    parser.add_argument("--build-staging-index", action="store_true")
     args = parser.parse_args()
+    if args.build_staging_index and args.candidate_profile_id is None:
+        parser.error("--build-staging-index requires --candidate-profile-id")
     report = await _run_from_cli(args)
     if args.report:
         report.write(args.report)
