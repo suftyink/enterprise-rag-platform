@@ -62,8 +62,8 @@ class KnowledgeCleanupExecutor:
         request = await self._claim(document_id)
         if request is None:
             return CleanupOutcome(document_id, CleanupDecision.SKIPPED, None)
-        vectors = await self._vector_writer(document_id)
         try:
+            vectors = await self._vector_writer(document_id)
             for artifact in request.artifacts:
                 if artifact["kind"] == "vector_document":
                     await asyncio.to_thread(

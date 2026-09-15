@@ -392,6 +392,7 @@ def _document(*, version: int, document_key: str = "inventory-sop") -> Knowledge
         title=f"Inventory SOP v{version}",
         original_filename=f"inventory-v{version}.pdf",
         media_type="application/pdf",
+        data_classification="ORDINARY",
         size_bytes=100,
         sha256=uuid4().hex + uuid4().hex,
         object_key=f"knowledge/{document_id}/original.pdf",

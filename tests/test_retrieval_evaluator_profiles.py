@@ -38,7 +38,11 @@ from erp_assistant.orchestration.providers import ProviderBoundary
 from erp_assistant.rag.chunker import ChunkDraft
 from erp_assistant.rag.classified_retriever import ClassifiedRetrieverRouter
 from erp_assistant.rag.profile_bound_retriever import ProfileBoundRetriever
-from erp_assistant.rag.retriever import KnowledgeRetriever, RetrievalOutcome
+from erp_assistant.rag.retriever import (
+    KnowledgeRetriever,
+    RetrievalOutcome,
+    retrieval_configuration_fingerprint,
+)
 from erp_assistant.rag.types import DataClassification, SearchDecision
 from erp_assistant.rag.vector_store import VectorHit
 from tests.retrieval_evaluation_support import (
@@ -83,6 +87,25 @@ class OneHitVectorStore:
         del document_id
 
 
+class FirstHitThenEmptyVectorStore(OneHitVectorStore):
+    def __init__(self, chunk_id: UUID) -> None:
+        super().__init__(chunk_id)
+        self._calls = 0
+
+    def search(
+        self,
+        query: str,
+        vector: list[float],
+        tenant_id: str,
+        limit: int,
+        rrf_k: int,
+    ) -> list[VectorHit]:
+        self._calls += 1
+        if self._calls == 1:
+            return super().search(query, vector, tenant_id, limit, rrf_k)
+        return []
+
+
 class FailIfCalledActivator:
     async def activate(self, profile_id: UUID, report: EvaluationReport) -> ProfileActivation:
         del profile_id, report
@@ -113,6 +136,7 @@ async def retrieval_session() -> AsyncIterator[AsyncSession]:
                 title="Semantic SOP",
                 original_filename="semantic.md",
                 media_type="text/markdown",
+                data_classification=DataClassification.ORDINARY.value,
                 size_bytes=100,
                 sha256="a" * 64,
                 object_key="knowledge/semantic.md",
@@ -138,6 +162,8 @@ async def retrieval_session() -> AsyncIterator[AsyncSession]:
                 content_hash="b" * 64,
                 char_count=56,
                 embedding_model="semantic-embed:v1",
+                embedding_deployment="cloud-embedding-prod",
+                embedding_dimension=3,
                 heading_path=[],
                 block_kind="PARAGRAPH",
                 source_locator={"pageStart": 1, "pageEnd": 1},
@@ -158,7 +184,9 @@ async def profile_store() -> AsyncIterator[SqlRetrievalProfileStore]:
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    yield SqlRetrievalProfileStore(factory)
+    yield SqlRetrievalProfileStore(
+        factory, runtime_binding_validator=lambda profile: bool(profile.id)
+    )
     await engine.dispose()
 
 
@@ -299,6 +327,85 @@ async def test_run_uses_real_http_profile_and_records_safe_usage(
     assert route.request_count == 2
     assert route.input_tokens == 18
     assert question not in json.dumps(report.to_dict())
+
+
+@pytest.mark.asyncio
+async def test_run_does_not_recount_previous_rerank_usage_when_next_query_has_no_hits(
+    tmp_path: Path,
+    retrieval_session: AsyncSession,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/embeddings":
+            return httpx.Response(
+                200,
+                json={
+                    "data": [{"index": 0, "embedding": [0.1, 0.2, 0.3]}],
+                    "usage": {"prompt_tokens": 7},
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "results": [{"index": 0, "relevance_score": 0.96}],
+                "usage": {"total_tokens": 11},
+            },
+        )
+
+    async with httpx.AsyncClient(
+        base_url="https://approved-cloud.example",
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        embedding = HttpEmbeddingProvider(
+            client,
+            deployment="cloud-embedding-prod",
+            model="semantic-embed",
+            version="v1",
+            dimension=3,
+            boundary=ProviderBoundary.CLOUD,
+        )
+        reranker = HttpRerankProvider(
+            client,
+            deployment="cloud-rerank-prod",
+            model="semantic-rerank",
+            version="v2",
+            boundary=ProviderBoundary.CLOUD,
+        )
+        chunk_id = await retrieval_session.scalar(select(KnowledgeChunk.id))
+        assert chunk_id is not None
+        retriever = KnowledgeRetriever(
+            session=retrieval_session,
+            vector_store=FirstHitThenEmptyVectorStore(chunk_id),
+            embedding=embedding,
+            reranker=reranker,
+            settings=Settings(rag_enabled=True, rag_rerank_threshold=0.5),
+        )
+        dataset = write_dataset(
+            tmp_path / "usage-reset.jsonl",
+            [
+                evaluation_case(
+                    "usage-1",
+                    "first query",
+                    expected_sources=[
+                        {"documentKey": "semantic-sop", "pageStart": 1, "pageEnd": 1}
+                    ],
+                    expected_decision="MATCHED",
+                    categories=["CHINESE_NATURAL_LANGUAGE"],
+                ),
+                evaluation_case(
+                    "usage-2",
+                    "second query",
+                    expected_sources=[],
+                    expected_decision="INSUFFICIENT_KNOWLEDGE",
+                    categories=["NO_ANSWER"],
+                ),
+            ],
+        )
+
+        report = await RetrievalEvaluator(retriever, environment()).run(dataset)
+
+    route = report.metadata.routes[0]
+    assert route.request_count == 3
+    assert route.input_tokens == 25
 
 
 @pytest.mark.asyncio
@@ -732,6 +839,13 @@ def _passing_business_scenario() -> tuple[list[dict[str, object]], dict[str, Ret
                     "rrfK": 60,
                     "rerankThreshold": 0.5,
                 },
+                config_fingerprint=retrieval_configuration_fingerprint(
+                    {
+                        "candidateCount": 40,
+                        "rrfK": 60,
+                        "rerankThreshold": 0.5,
+                    }
+                ),
             ),
         )
     return cases, outcomes
@@ -749,6 +863,11 @@ async def test_run_activates_only_passing_staging_profiles_and_supports_rollback
     second_id = uuid4()
 
     def profile(profile_id: UUID, version: int) -> RetrievalProfile:
+        retrieval_config: dict[str, int | float | bool | str] = {
+            "candidateCount": 40,
+            "rrfK": 60,
+            "rerankThreshold": 0.5,
+        }
         return RetrievalProfile(
             id=profile_id,
             profile_key="ordinary-pilot",
@@ -763,8 +882,8 @@ async def test_run_activates_only_passing_staging_profiles_and_supports_rollback
             index_identity=f"staging-index-v{version}",
             parser_version="parser-v1",
             chunk_version="chunk-v1",
-            retrieval_config={"candidateCount": 40, "rrfK": 60, "rerankThreshold": 0.5},
-            configuration_fingerprint="a" * 64,
+            retrieval_config=retrieval_config,
+            configuration_fingerprint=retrieval_configuration_fingerprint(retrieval_config),
         )
 
     first = profile(first_id, 1)

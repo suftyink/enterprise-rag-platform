@@ -31,13 +31,14 @@ from erp_assistant.evaluation.models import (
 from erp_assistant.evaluation.profiles import ProfileActivator
 from erp_assistant.infrastructure.database import SessionFactory
 from erp_assistant.orchestration.provider_factory import (
-    get_embedding_provider,
-    get_rerank_provider,
+    get_embedding_provider_for,
+    get_rerank_provider_for,
 )
+from erp_assistant.rag.classified_retriever import ClassifiedRetrieverRouter
 from erp_assistant.rag.errors import RagDependencyError, RagError
 from erp_assistant.rag.retriever import KnowledgeRetriever, RetrievalRequest, RetrievalRun
 from erp_assistant.rag.types import DataClassification
-from erp_assistant.rag.vector_store import get_vector_store
+from erp_assistant.rag.vector_store import get_vector_store_for
 
 __all__ = [
     "EvaluationDatasetError",
@@ -280,8 +281,23 @@ def _comparison_key(
 
 async def _run_from_cli(args: argparse.Namespace) -> EvaluationReport:
     settings = get_settings()
+    index_identity = args.index_identity or settings.milvus_collection
+    vector_stores = None
+    classifications: set[DataClassification] = set()
+    if not args.base_url:
+        dataset = load_dataset(args.dataset)
+        classifications = {case.data_classification for case in dataset.cases}
+        vector_stores = {
+            classification: get_vector_store_for(classification)
+            for classification in classifications
+        }
+        if not args.index_identity:
+            index_identity = "|".join(
+                vector_stores[classification].identity
+                for classification in sorted(classifications, key=lambda item: item.value)
+            )
     environment = EvaluationEnvironment(
-        index_identity=args.index_identity or settings.milvus_collection,
+        index_identity=index_identity,
         parser_version=args.parser_version,
         chunk_version=(
             args.chunk_version
@@ -297,12 +313,18 @@ async def _run_from_cli(args: argparse.Namespace) -> EvaluationReport:
                 args.dataset
             )
     async with SessionFactory() as session:
-        retriever = KnowledgeRetriever(
-            session=session,
-            vector_store=get_vector_store(),
-            embedding=get_embedding_provider(),
-            reranker=get_rerank_provider(),
-            settings=settings,
+        assert vector_stores is not None
+        retriever = ClassifiedRetrieverRouter(
+            {
+                classification: KnowledgeRetriever(
+                    session=session,
+                    vector_store=vector_stores[classification],
+                    embedding=get_embedding_provider_for(classification),
+                    reranker=get_rerank_provider_for(classification),
+                    settings=settings,
+                )
+                for classification in classifications
+            }
         )
         return await RetrievalEvaluator(retriever, environment).run(args.dataset)
 

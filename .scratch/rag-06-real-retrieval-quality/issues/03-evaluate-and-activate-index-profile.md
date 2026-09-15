@@ -16,4 +16,4 @@
 
 ## Comments
 
-新增持久化 staging/active/rollback profile、固定数据集与完整质量门禁、证据新鲜度、检索参数逐项匹配和唯一活动记录保护；生产查询只接受活动 profile 指纹。仍需引入受信 deployment registry，让活动记录直接解析完整运行时组合，才能完成真正的原子切换与无重启回滚。
+新增持久化 staging/active/rollback profile、固定数据集与完整质量门禁、证据新鲜度、检索参数逐项匹配、指纹重算和唯一活动记录保护；没有显式运行时绑定校验器时禁止写入 ACTIVE，生产查询只接受活动 profile 指纹。仍需引入受信 deployment registry，让活动记录直接解析完整运行时组合，才能完成真正的原子切换与无重启回滚。

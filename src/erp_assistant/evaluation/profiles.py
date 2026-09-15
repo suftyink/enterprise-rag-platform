@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -11,6 +12,7 @@ from erp_assistant.evaluation.models import EvaluationReport, GateDecision
 from erp_assistant.models.knowledge import RetrievalProfileRecord
 from erp_assistant.orchestration.providers import ProviderBoundary
 from erp_assistant.rag.errors import RagError
+from erp_assistant.rag.retriever import retrieval_configuration_fingerprint
 from erp_assistant.rag.types import DataClassification
 
 
@@ -82,9 +84,11 @@ class SqlRetrievalProfileStore:
         session_factory: async_sessionmaker[AsyncSession],
         *,
         maximum_evidence_age: timedelta = timedelta(hours=24),
+        runtime_binding_validator: Callable[[RetrievalProfileRecord], bool] | None = None,
     ) -> None:
         self._sessions = session_factory
         self._maximum_evidence_age = maximum_evidence_age
+        self._runtime_binding_validator = runtime_binding_validator
 
     async def stage(self, profile: RetrievalProfile) -> None:
         profile.validate()
@@ -127,6 +131,13 @@ class SqlRetrievalProfileStore:
             if candidate is None:
                 raise RagError("PROFILE_NOT_FOUND", "staging Profile 不存在")
             self._validate_evidence(candidate, report)
+            if self._runtime_binding_validator is None or not self._runtime_binding_validator(
+                candidate
+            ):
+                raise RagError(
+                    "PROFILE_RUNTIME_BINDING_UNAVAILABLE",
+                    "候选 Profile 未注册为可解析的运行时绑定",
+                )
             active = await session.scalar(
                 select(RetrievalProfileRecord)
                 .where(
@@ -135,6 +146,16 @@ class SqlRetrievalProfileStore:
                 )
                 .with_for_update()
             )
+            valid_transition = candidate.status == ProfileStatus.STAGING.value or (
+                candidate.status == ProfileStatus.ROLLBACK.value
+                and active is not None
+                and active.previous_profile_id == candidate.id
+            )
+            if not valid_transition:
+                raise RagError(
+                    "INVALID_PROFILE_TRANSITION",
+                    "只能激活 staging Profile 或回滚到当前版本的直接前序",
+                )
             if (
                 active is not None
                 and active.id != candidate.id
@@ -186,6 +207,8 @@ class SqlRetrievalProfileStore:
             and candidate.production_ready
             and route.configuration_fingerprint == candidate.configuration_fingerprint
             and route.retrieval_config == candidate.retrieval_config
+            and candidate.configuration_fingerprint
+            == retrieval_configuration_fingerprint(candidate.retrieval_config)
         )
         if not matches:
             raise RagError("PROFILE_EVIDENCE_MISMATCH", "评测证据与 staging Profile 不匹配")

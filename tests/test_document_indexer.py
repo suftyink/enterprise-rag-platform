@@ -217,6 +217,7 @@ async def _add_document(
         title="Inventory SOP",
         original_filename=filename,
         media_type=media_type,
+        data_classification="ORDINARY",
         size_bytes=len(content),
         sha256=f"{version:064x}",
         object_key=object_key,

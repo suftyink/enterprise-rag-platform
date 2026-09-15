@@ -421,6 +421,7 @@ def _ready_document(scope: str, scope_id: str, key: str) -> KnowledgeDocument:
         title=key,
         original_filename=f"{key}.pdf",
         media_type="application/pdf",
+        data_classification="ORDINARY",
         size_bytes=100,
         sha256=uuid4().hex + uuid4().hex,
         object_key=f"knowledge/{document_id}/original.pdf",
@@ -448,4 +449,6 @@ def _chunk(document: KnowledgeDocument, index: int, content: str) -> KnowledgeCh
         content_hash=uuid4().hex + uuid4().hex,
         char_count=len(content),
         embedding_model="fake-lexical-v1",
+        embedding_deployment="local-fake",
+        embedding_dimension=256,
     )

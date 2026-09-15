@@ -346,9 +346,7 @@ async def test_retrieve_rejects_non_finite_rerank_scores(
         await session.commit()
         retriever = KnowledgeRetriever(
             session=session,
-            vector_store=RecordingVectorStore(
-                hits=[VectorHit(chunk_id=chunk.id, score=0.9)]
-            ),
+            vector_store=RecordingVectorStore(hits=[VectorHit(chunk_id=chunk.id, score=0.9)]),
             embedding=FakeEmbeddingProvider(),
             reranker=InvalidScoreReranker(score),
             settings=Settings(rag_enabled=True),
@@ -560,10 +558,7 @@ class TieReranker:
 
     async def rerank(self, query: str, documents: list[str]) -> list[RankedDocument]:
         del query
-        return [
-            RankedDocument(index=index, score=0.5)
-            for index in range(len(documents))
-        ]
+        return [RankedDocument(index=index, score=0.5) for index in range(len(documents))]
 
 
 class RecordingMilvusClient:
@@ -644,6 +639,7 @@ def _ready_document(scope: str, scope_id: str, key: str) -> KnowledgeDocument:
         title=key,
         original_filename=f"{key}.pdf",
         media_type="application/pdf",
+        data_classification="ORDINARY",
         size_bytes=100,
         sha256=uuid4().hex + uuid4().hex,
         object_key=f"knowledge/{document_id}/original.pdf",
@@ -676,4 +672,6 @@ def _chunk(
         content_hash=uuid4().hex + uuid4().hex,
         char_count=len(content),
         embedding_model="fake-lexical-v1",
+        embedding_deployment="local-fake",
+        embedding_dimension=FakeEmbeddingProvider.dimension,
     )

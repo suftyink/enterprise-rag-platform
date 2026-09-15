@@ -62,7 +62,9 @@ class KnowledgeDocument(Base):
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
     media_type: Mapped[str] = mapped_column(String(128), nullable=False)
-    data_classification: Mapped[str] = mapped_column(String(32), nullable=False, default="ORDINARY")
+    data_classification: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="UNCLASSIFIED"
+    )
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
     sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     object_key: Mapped[str] = mapped_column(String(512), unique=True, nullable=False)
@@ -123,6 +125,7 @@ class KnowledgeChunk(Base):
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     char_count: Mapped[int] = mapped_column(Integer, nullable=False)
     embedding_model: Mapped[str] = mapped_column(String(64), nullable=False)
+    embedding_deployment: Mapped[str] = mapped_column(String(128), nullable=False, default="legacy")
     embedding_dimension: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     retrieval_profile: Mapped[str] = mapped_column(String(128), nullable=False, default="legacy")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)

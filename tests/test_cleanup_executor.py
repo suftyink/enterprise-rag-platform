@@ -198,6 +198,7 @@ async def test_cleanup_executor_reclaims_failed_request_on_retry(
         title="Inventory SOP",
         original_filename="inventory.pdf",
         media_type="application/pdf",
+        data_classification=DataClassification.ORDINARY.value,
         size_bytes=100,
         sha256="a" * 64,
         object_key="knowledge/inventory/original.pdf",
@@ -252,3 +253,71 @@ async def test_cleanup_executor_reclaims_failed_request_on_retry(
     completed = await corpus.inspect(document_id, SYSTEM_CORPUS_ACTOR)
     assert completed.cleanup_requests[-1].status is CleanupStatus.COMPLETED
     assert completed.cleanup_requests[-1].attempt == 2
+
+
+@pytest.mark.asyncio
+async def test_cleanup_executor_marks_missing_classification_route_as_retryable(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    document_id = uuid4()
+    document = KnowledgeDocument(
+        id=document_id,
+        scope="TENANT",
+        scope_id="tenant-a",
+        tenant_id="tenant-a",
+        document_key="unclassified-sop",
+        version=1,
+        title="Unclassified SOP",
+        original_filename="sop.pdf",
+        media_type="application/pdf",
+        data_classification=DataClassification.UNCLASSIFIED.value,
+        size_bytes=100,
+        sha256="c" * 64,
+        object_key="knowledge/unclassified/original.pdf",
+        vector_document_id=document_id,
+        status=DocumentStatus.READY.value,
+        active=False,
+        publication_status="WITHDRAWN",
+        retention_status=RetentionStatus.RETAINED.value,
+        index_artifacts_present=True,
+        created_by="legacy-import",
+    )
+    cleanup = KnowledgeCleanupRequest(
+        document_id=document_id,
+        idempotency_key=f"{document_id}:VECTOR:1",
+        kind="VECTOR",
+        status=CleanupStatus.PENDING.value,
+        artifacts=[{"kind": "vector_document", "document_id": str(document_id)}],
+    )
+    async with session_factory() as session:
+        session.add_all(
+            [
+                document,
+                KnowledgeCorpusHead(
+                    scope=document.scope,
+                    scope_id=document.scope_id,
+                    document_key=document.document_key,
+                    revision=1,
+                ),
+                cleanup,
+            ]
+        )
+        await session.commit()
+    corpus = KnowledgeCorpus(session_factory=session_factory, processor=UnusedProcessor())
+    vectors = RecordingVectors(identity="ordinary-vectors")
+    executor = KnowledgeCleanupExecutor(
+        session_factory=session_factory,
+        storage=RecordingStorage(),
+        vectors=vectors,  # type: ignore[arg-type]
+        vectors_by_classification={
+            DataClassification.ORDINARY: vectors,  # type: ignore[dict-item]
+        },
+        corpus=corpus,
+    )
+
+    with pytest.raises(CleanupRetryableError):
+        await executor.execute(document_id)
+
+    failed = await corpus.inspect(document_id, SYSTEM_CORPUS_ACTOR)
+    assert failed.cleanup_requests[-1].status is CleanupStatus.FAILED
+    assert failed.cleanup_requests[-1].attempt == 1

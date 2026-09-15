@@ -1,5 +1,7 @@
+import json
 from dataclasses import dataclass
 from enum import StrEnum
+from hashlib import sha256
 from typing import Protocol
 
 
@@ -47,3 +49,17 @@ class RerankProvider(Protocol):
     model: str
 
     async def rerank(self, query: str, documents: list[str]) -> list[RankedDocument]: ...
+
+
+def embedding_binding_fingerprint(provider: EmbeddingProvider) -> str:
+    payload = json.dumps(
+        {
+            "boundary": str(getattr(provider, "boundary", ProviderBoundary.INTERNAL)),
+            "deployment": str(getattr(provider, "deployment", "legacy")),
+            "dimension": provider.dimension,
+            "model": provider.model,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return sha256(payload).hexdigest()

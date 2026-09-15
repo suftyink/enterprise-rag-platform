@@ -54,8 +54,10 @@ async def create_document(
     title: str,
     original_filename: str,
     media_type: str,
-    data_classification: DataClassification = DataClassification.ORDINARY,
+    data_classification: DataClassification,
 ) -> DocumentCreateResult:
+    if data_classification is DataClassification.UNCLASSIFIED:
+        raise RagError("DOCUMENT_CLASSIFICATION_REQUIRED", "必须先完成可信文档分类")
     owner = scope_id_for(scope, tenant_id)
     digest = sha256(content).hexdigest()
     duplicate = await session.scalar(

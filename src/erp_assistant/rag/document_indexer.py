@@ -15,7 +15,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from erp_assistant.core.config import Settings
 from erp_assistant.infrastructure.object_storage import ObjectStorage
 from erp_assistant.models.knowledge import KnowledgeChunk, KnowledgeDocument, KnowledgeIndexJob
-from erp_assistant.orchestration.providers import EmbeddingProvider, ProviderBoundary
+from erp_assistant.orchestration.providers import (
+    EmbeddingProvider,
+    ProviderBoundary,
+    embedding_binding_fingerprint,
+)
 from erp_assistant.rag.chunker import (
     CHUNK_STRATEGY_VERSION,
     ChunkDraft,
@@ -497,7 +501,7 @@ class DocumentIndexer:
         values = {
             "parser": self._parser.identity,
             "chunking": f"{CHUNK_STRATEGY_VERSION};{chunking}",
-            "embedding": f"{self._embedding.model}:{self._embedding.dimension}",
+            "embedding": embedding_binding_fingerprint(self._embedding),
             "vector_index": self._vectors.identity,
         }
         revision = sha256(
@@ -743,6 +747,7 @@ class DocumentIndexer:
             content_hash=draft.content_hash,
             char_count=len(draft.content),
             embedding_model=self._embedding.model,
+            embedding_deployment=str(getattr(self._embedding, "deployment", "legacy")),
             embedding_dimension=self._embedding.dimension,
             retrieval_profile=self.pipeline.revision,
             heading_path=list(draft.heading_path),

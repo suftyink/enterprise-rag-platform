@@ -44,8 +44,11 @@ class HttpEmbeddingProvider:
     def usage(self) -> ProviderUsage:
         return self._usage.get() or ProviderUsage()
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    def reset_usage(self) -> None:
         self._usage.set(ProviderUsage())
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        self.reset_usage()
         payload = await _post_json(
             self._client,
             self._path,
@@ -102,8 +105,11 @@ class HttpRerankProvider:
     def usage(self) -> ProviderUsage:
         return self._usage.get() or ProviderUsage()
 
-    async def rerank(self, query: str, documents: list[str]) -> list[RankedDocument]:
+    def reset_usage(self) -> None:
         self._usage.set(ProviderUsage())
+
+    async def rerank(self, query: str, documents: list[str]) -> list[RankedDocument]:
+        self.reset_usage()
         payload = await _post_json(
             self._client,
             self._path,

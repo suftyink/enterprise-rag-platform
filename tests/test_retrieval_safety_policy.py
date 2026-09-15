@@ -4,6 +4,7 @@ import pytest
 
 from erp_assistant.api.routes.knowledge import _classify_document
 from erp_assistant.core.config import Settings
+from erp_assistant.orchestration import provider_factory
 from erp_assistant.orchestration.provider_factory import _validated_restricted_url
 from erp_assistant.rag.errors import RagError
 from erp_assistant.rag.types import DataClassification
@@ -39,3 +40,20 @@ def test_restricted_provider_endpoint_must_be_in_independent_host_registry() -> 
         )
         == "https://internal-model.corp/v1"
     )
+
+
+def test_invalid_http_profile_is_rejected_before_allocating_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        embedding_provider="http",
+        ordinary_embedding_base_url="https://model.example/v1",
+    )
+    monkeypatch.setattr(provider_factory, "get_settings", lambda: settings)
+    provider_factory.get_embedding_provider_for.cache_clear()
+    before = len(provider_factory._http_clients)
+
+    with pytest.raises(ValueError, match="profile identity"):
+        provider_factory.get_embedding_provider_for(DataClassification.ORDINARY)
+
+    assert len(provider_factory._http_clients) == before

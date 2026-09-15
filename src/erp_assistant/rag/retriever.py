@@ -25,6 +25,18 @@ from erp_assistant.rag.types import DataClassification, KnowledgeScope, SearchDe
 from erp_assistant.rag.vector_store import VectorStore
 
 
+def retrieval_configuration_fingerprint(
+    config: dict[str, int | float | bool | str],
+) -> str:
+    payload = json.dumps(
+        config,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return sha256(payload).hexdigest()
+
+
 @dataclass(frozen=True)
 class ActorContext:
     subject_id: str
@@ -103,6 +115,7 @@ class KnowledgeRetriever:
 
     async def retrieve(self, request: RetrievalRequest) -> RetrievalOutcome:
         request = self._normalize_request(request)
+        self._reset_provider_usage()
         if request.data_classification is DataClassification.UNCLASSIFIED:
             raise RagDependencyError(
                 "DATA_CLASSIFICATION_REQUIRED", "未分类知识不能进入检索 Provider"
@@ -186,6 +199,10 @@ class KnowledgeRetriever:
                         KnowledgeChunk.id.in_([hit.chunk_id for hit in hits]),
                         *retrieval_eligibility_filters(),
                         KnowledgeDocument.data_classification == request.data_classification.value,
+                        KnowledgeChunk.embedding_model == self._embedding.model,
+                        KnowledgeChunk.embedding_deployment
+                        == str(getattr(self._embedding, "deployment", "legacy")),
+                        KnowledgeChunk.embedding_dimension == self._embedding.dimension,
                         or_(
                             KnowledgeDocument.scope == KnowledgeScope.GLOBAL.value,
                             (
@@ -288,13 +305,7 @@ class KnowledgeRetriever:
         return str(getattr(self._vector_store, "identity", self._settings.milvus_collection))
 
     def configuration_fingerprint(self) -> str:
-        payload = json.dumps(
-            self.retrieval_config(),
-            ensure_ascii=True,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-        return sha256(payload).hexdigest()
+        return retrieval_configuration_fingerprint(self.retrieval_config())
 
     def retrieval_config(self) -> dict[str, int | float | bool | str]:
         return {
@@ -330,3 +341,9 @@ class KnowledgeRetriever:
             requests=embedding.requests + reranker.requests,
             input_tokens=embedding.input_tokens + reranker.input_tokens,
         )
+
+    def _reset_provider_usage(self) -> None:
+        for provider in (self._embedding, self._reranker):
+            reset = getattr(provider, "reset_usage", None)
+            if callable(reset):
+                reset()

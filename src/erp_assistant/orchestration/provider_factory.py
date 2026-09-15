@@ -55,14 +55,22 @@ def get_embedding_provider_for(classification: DataClassification) -> EmbeddingP
     if provider == "http":
         prefix = "restricted" if classification is DataClassification.RESTRICTED else "ordinary"
         base_url = str(getattr(settings, f"{prefix}_embedding_base_url"))
+        deployment = str(getattr(settings, f"{prefix}_embedding_deployment"))
+        model = str(getattr(settings, f"{prefix}_embedding_model"))
+        version = str(getattr(settings, f"{prefix}_embedding_version"))
+        dimension = int(getattr(settings, f"{prefix}_embedding_dimension"))
+        if not all(value.strip() for value in (base_url, deployment, model, version)):
+            raise ValueError("Embedding profile identity is invalid")
+        if dimension < 1:
+            raise ValueError("Embedding profile identity is invalid")
         if classification is DataClassification.RESTRICTED:
             base_url = _validated_restricted_url(base_url, settings.restricted_provider_hosts)
         return HttpEmbeddingProvider(
             _http_client(base_url, settings.retrieval_provider_timeout_seconds),
-            deployment=str(getattr(settings, f"{prefix}_embedding_deployment")),
-            model=str(getattr(settings, f"{prefix}_embedding_model")),
-            version=str(getattr(settings, f"{prefix}_embedding_version")),
-            dimension=int(getattr(settings, f"{prefix}_embedding_dimension")),
+            deployment=deployment,
+            model=model,
+            version=version,
+            dimension=dimension,
             boundary=(
                 ProviderBoundary.INTERNAL
                 if classification is DataClassification.RESTRICTED
@@ -89,13 +97,18 @@ def get_rerank_provider_for(classification: DataClassification) -> RerankProvide
     if provider == "http":
         prefix = "restricted" if classification is DataClassification.RESTRICTED else "ordinary"
         base_url = str(getattr(settings, f"{prefix}_rerank_base_url"))
+        deployment = str(getattr(settings, f"{prefix}_rerank_deployment"))
+        model = str(getattr(settings, f"{prefix}_rerank_model"))
+        version = str(getattr(settings, f"{prefix}_rerank_version"))
+        if not all(value.strip() for value in (base_url, deployment, model, version)):
+            raise ValueError("Rerank profile identity is invalid")
         if classification is DataClassification.RESTRICTED:
             base_url = _validated_restricted_url(base_url, settings.restricted_provider_hosts)
         return HttpRerankProvider(
             _http_client(base_url, settings.retrieval_provider_timeout_seconds),
-            deployment=str(getattr(settings, f"{prefix}_rerank_deployment")),
-            model=str(getattr(settings, f"{prefix}_rerank_model")),
-            version=str(getattr(settings, f"{prefix}_rerank_version")),
+            deployment=deployment,
+            model=model,
+            version=version,
             boundary=(
                 ProviderBoundary.INTERNAL
                 if classification is DataClassification.RESTRICTED

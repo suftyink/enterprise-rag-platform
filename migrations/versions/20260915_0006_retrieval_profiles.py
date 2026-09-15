@@ -31,6 +31,10 @@ def upgrade() -> None:
     )
     op.add_column(
         "knowledge_chunk",
+        sa.Column("embedding_deployment", sa.String(128), nullable=False, server_default="legacy"),
+    )
+    op.add_column(
+        "knowledge_chunk",
         sa.Column("retrieval_profile", sa.String(128), nullable=False, server_default="legacy"),
     )
     op.add_column("knowledge_index_job", sa.Column("embedding_deployment", sa.String(128)))
@@ -89,5 +93,6 @@ def downgrade() -> None:
     op.drop_column("knowledge_index_job", "embedding_dimension")
     op.drop_column("knowledge_index_job", "embedding_deployment")
     op.drop_column("knowledge_chunk", "retrieval_profile")
+    op.drop_column("knowledge_chunk", "embedding_deployment")
     op.drop_column("knowledge_chunk", "embedding_dimension")
     op.drop_column("knowledge_document", "data_classification")

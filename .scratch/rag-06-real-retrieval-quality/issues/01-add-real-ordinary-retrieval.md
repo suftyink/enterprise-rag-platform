@@ -16,4 +16,4 @@
 
 ## Comments
 
-已接入窄契约 HTTP Embedding/Rerank Adapter、模型与索引绑定、无内容遥测及统一 Provider 错误；Fake 仅保留给确定性开发测试，生产门禁会拒绝其 profile。仍需接入实际批准的模型凭据和业务评测集，生成真实语义/SKU 基线报告。
+已接入窄契约 HTTP Embedding/Rerank Adapter、按 deployment/model/dimension 隔离的物理集合与查询过滤、无内容遥测及统一 Provider 错误；Fake 仅保留给确定性开发测试，生产门禁会拒绝其 profile。仍需接入实际批准的模型凭据和业务评测集，生成真实语义/SKU 基线报告。

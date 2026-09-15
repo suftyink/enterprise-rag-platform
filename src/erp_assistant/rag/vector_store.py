@@ -16,6 +16,7 @@ from pymilvus import (
 
 from erp_assistant.core.config import get_settings
 from erp_assistant.orchestration.provider_factory import get_embedding_provider_for
+from erp_assistant.orchestration.providers import embedding_binding_fingerprint
 from erp_assistant.rag.chunker import ChunkDraft
 from erp_assistant.rag.types import DataClassification
 
@@ -52,12 +53,25 @@ class VectorStore(Protocol):
 
 
 class MilvusVectorStore:
-    def __init__(self, uri: str, collection: str, dimension: int) -> None:
+    def __init__(
+        self,
+        uri: str,
+        collection: str,
+        dimension: int,
+        *,
+        embedding_binding: str = "legacy",
+    ) -> None:
         self.uri = uri
-        self.collection = collection
+        self.base_collection = collection
         self.dimension = dimension
+        self.embedding_binding = embedding_binding
+        binding_hash = sha256(embedding_binding.encode("utf-8")).hexdigest()[:12]
+        self.collection_prefix = f"{collection}_v3_d"
+        self.collection = f"{self.collection_prefix}{dimension}"
         namespace = sha256(uri.encode("utf-8")).hexdigest()[:12]
-        self.identity = f"milvus-v2:{namespace}:{collection}:dense-{dimension}:bm25"
+        self.identity = (
+            f"milvus-v3:{namespace}:{self.collection}:dense-{dimension}:bm25:{binding_hash}"
+        )
 
     def _client(self) -> MilvusClient:
         return MilvusClient(uri=self.uri)
@@ -81,6 +95,7 @@ class MilvusVectorStore:
         schema.add_field("scope_id", DataType.VARCHAR, max_length=64)
         schema.add_field("document_id", DataType.VARCHAR, max_length=36)
         schema.add_field("version", DataType.INT64)
+        schema.add_field("embedding_binding", DataType.VARCHAR, max_length=255)
         schema.add_function(
             Function(
                 name="text_bm25",
@@ -112,7 +127,12 @@ class MilvusVectorStore:
         client = self._client()
         try:
             self._ensure_collection(client)
-            self.delete_document(document_id)
+            self._delete_from_collection(
+                client,
+                self.collection,
+                document_id,
+                embedding_binding=self.embedding_binding,
+            )
             if chunks:
                 client.upsert(
                     self.collection,
@@ -126,6 +146,7 @@ class MilvusVectorStore:
                             "scope_id": scope_id,
                             "document_id": str(document_id),
                             "version": version,
+                            "embedding_binding": self.embedding_binding,
                         }
                         for chunk, vector in zip(chunks, vectors, strict=True)
                     ],
@@ -136,11 +157,36 @@ class MilvusVectorStore:
     def delete_document(self, document_id: UUID) -> None:
         client = self._client()
         try:
-            if client.has_collection(self.collection):
-                value = json.dumps(str(document_id))
-                client.delete(self.collection, filter=f"document_id == {value}")
+            list_collections = getattr(client, "list_collections", None)
+            collections = (
+                [
+                    name
+                    for name in list_collections()
+                    if str(name) == self.base_collection
+                    or str(name).startswith(self.collection_prefix)
+                ]
+                if callable(list_collections)
+                else [self.collection]
+            )
+            for collection in collections:
+                self._delete_from_collection(client, str(collection), document_id)
         finally:
             client.close()
+
+    @staticmethod
+    def _delete_from_collection(
+        client: MilvusClient,
+        collection: str,
+        document_id: UUID,
+        *,
+        embedding_binding: str | None = None,
+    ) -> None:
+        if not client.has_collection(collection):
+            return
+        expression = f"document_id == {json.dumps(str(document_id))}"
+        if embedding_binding is not None:
+            expression += f" and embedding_binding == {json.dumps(embedding_binding)}"
+        client.delete(collection, filter=expression)
 
     def search(
         self,
@@ -157,8 +203,11 @@ class MilvusVectorStore:
             global_scope = json.dumps("GLOBAL")
             tenant_scope = json.dumps("TENANT")
             tenant = json.dumps(tenant_id)
+            embedding_binding = json.dumps(self.embedding_binding)
             expression = (
-                f"(scope == {global_scope}) or (scope == {tenant_scope} and scope_id == {tenant})"
+                f"embedding_binding == {embedding_binding} and "
+                f"((scope == {global_scope}) or "
+                f"(scope == {tenant_scope} and scope_id == {tenant}))"
             )
             dense_request = AnnSearchRequest(
                 data=[vector],
@@ -212,4 +261,5 @@ def get_vector_store_for(classification: DataClassification) -> MilvusVectorStor
         uri=settings.milvus_uri,
         collection=collection,
         dimension=embedding.dimension,
+        embedding_binding=embedding_binding_fingerprint(embedding),
     )
