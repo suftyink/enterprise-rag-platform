@@ -1,0 +1,18 @@
+from erp_assistant.core.config import get_settings
+from erp_assistant.infrastructure.database import SessionFactory
+from erp_assistant.infrastructure.object_storage import get_object_storage
+from erp_assistant.orchestration.provider_factory import get_embedding_provider
+from erp_assistant.rag.document_indexer import DocumentIndexer
+from erp_assistant.rag.pdf_parser import PypdfParser
+from erp_assistant.rag.vector_store import get_vector_store
+
+
+def get_document_indexer() -> DocumentIndexer:
+    return DocumentIndexer(
+        session_factory=SessionFactory,
+        storage=get_object_storage(),
+        parser=PypdfParser(),
+        embedding=get_embedding_provider(),
+        vector_writer=get_vector_store(),
+        settings=get_settings(),
+    )

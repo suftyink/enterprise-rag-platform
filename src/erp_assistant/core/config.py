@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     minio_access_key: str = "minioadmin"
     minio_secret_key: str = "minioadmin"
     minio_bucket: str = "erp-knowledge"
-    milvus_collection: str = "knowledge_chunks_hybrid_v1"
+    milvus_collection: str = "knowledge_chunks_hybrid_v2"
     rag_rrf_k: int = 60
     rag_candidate_multiplier: int = 4
     rag_max_candidates: int = 80
@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     knowledge_chunk_max: int = 900
     knowledge_chunk_overlap: int = 100
     knowledge_min_text_per_page: int = 20
+    knowledge_index_lease_seconds: int = 900
     allow_global_knowledge_upload: bool = False
     global_knowledge_operator_ids: str = ""
 

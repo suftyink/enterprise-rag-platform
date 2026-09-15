@@ -5,6 +5,7 @@ from uuid import UUID, uuid4
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient, Response
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -12,7 +13,11 @@ from erp_assistant.core.config import Settings, get_settings
 from erp_assistant.infrastructure.database import Base, get_session
 from erp_assistant.infrastructure.object_storage import get_object_storage
 from erp_assistant.main import app
-from erp_assistant.models.knowledge import KnowledgeChunk, KnowledgeDocument
+from erp_assistant.models.knowledge import (
+    KnowledgeChunk,
+    KnowledgeDocument,
+    KnowledgeIndexJob,
+)
 from erp_assistant.rag.types import DocumentStatus
 from erp_assistant.rag.vector_store import VectorHit, get_vector_store
 from erp_assistant.workers.dispatcher import get_document_dispatcher
@@ -148,6 +153,12 @@ async def test_upload_status_and_hash_deduplication(
     )
     assert status_response.status_code == 200
     assert status_response.json()["status"] == "QUEUED"
+    assert status_response.json()["jobStatus"] == "QUEUED"
+    assert status_response.json()["attempt"] == 0
+    assert status_response.json()["chunkCount"] == 0
+    assert status_response.json()["warnings"] == []
+    assert status_response.json()["pipelineRevision"] is None
+    assert status_response.json()["cleanupRequired"] is False
     hidden = await client.get(
         f"/api/assistant/v1/knowledge/documents/{first.json()['documentId']}",
         params={"tenantId": "tenant-b", "operatorId": "user-b"},
@@ -181,6 +192,14 @@ async def test_retry_failed_but_not_ocr_document(
         document = await session.get(KnowledgeDocument, document_id)
         assert document is not None
         document.status = DocumentStatus.FAILED.value
+        previous_job = await session.scalar(
+            select(KnowledgeIndexJob).where(KnowledgeIndexJob.document_id == document_id)
+        )
+        assert previous_job is not None
+        previous_job.cleanup_required = True
+        previous_job.cleanup_artifacts = [
+            {"kind": "vector_document", "document_id": str(uuid4())}
+        ]
         await session.commit()
     retried = await client.post(
         f"/api/assistant/v1/knowledge/documents/{document_id}/retry",
@@ -188,6 +207,14 @@ async def test_retry_failed_but_not_ocr_document(
     )
     assert retried.status_code == 202
     assert retried.json()["status"] == "QUEUED"
+    async with factory() as session:
+        retry_job = await session.scalar(
+            select(KnowledgeIndexJob)
+            .where(KnowledgeIndexJob.document_id == document_id)
+            .order_by(KnowledgeIndexJob.created_at.desc())
+        )
+    assert retry_job is not None and retry_job.cleanup_required is True
+    assert retry_job.cleanup_artifacts == previous_job.cleanup_artifacts
 
     async with factory() as session:
         document = await session.get(KnowledgeDocument, document_id)

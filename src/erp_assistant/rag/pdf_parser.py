@@ -24,12 +24,16 @@ class ParsedPdf:
 
 
 class PdfParser(Protocol):
+    version: str
+
     def inspect(self, content: bytes, max_pages: int) -> int: ...
 
     def parse(self, content: bytes, minimum_text_per_page: int) -> ParsedPdf: ...
 
 
 class PypdfParser:
+    version = "pypdf-v1"
+
     def _reader(self, content: bytes) -> PdfReader:
         try:
             reader = PdfReader(BytesIO(content))

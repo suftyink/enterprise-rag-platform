@@ -1,8 +1,9 @@
 import json
 from dataclasses import dataclass
 from functools import lru_cache
+from hashlib import sha256
 from typing import Protocol
-from uuid import UUID
+from uuid import UUID, uuid5
 
 from pymilvus import (
     AnnSearchRequest,
@@ -25,6 +26,8 @@ class VectorHit:
 
 
 class VectorStore(Protocol):
+    identity: str
+
     def upsert_document(
         self,
         document_id: UUID,
@@ -52,6 +55,8 @@ class MilvusVectorStore:
         self.uri = uri
         self.collection = collection
         self.dimension = dimension
+        namespace = sha256(uri.encode("utf-8")).hexdigest()[:12]
+        self.identity = f"milvus-v2:{namespace}:{collection}:dense-{dimension}:bm25"
 
     def _client(self) -> MilvusClient:
         return MilvusClient(uri=self.uri)
@@ -61,6 +66,7 @@ class MilvusVectorStore:
             return
         schema = MilvusClient.create_schema(auto_id=False, enable_dynamic_field=False)
         schema.add_field("id", DataType.VARCHAR, is_primary=True, max_length=36)
+        schema.add_field("chunk_id", DataType.VARCHAR, max_length=36)
         schema.add_field("dense_vector", DataType.FLOAT_VECTOR, dim=self.dimension)
         schema.add_field(
             "text",
@@ -111,7 +117,8 @@ class MilvusVectorStore:
                     self.collection,
                     data=[
                         {
-                            "id": str(chunk.id),
+                            "id": str(uuid5(document_id, str(chunk.id))),
+                            "chunk_id": str(chunk.id),
                             "dense_vector": vector,
                             "text": chunk.content,
                             "scope": scope,
@@ -172,10 +179,13 @@ class MilvusVectorStore:
                 reqs=[dense_request, sparse_request],
                 ranker=RRFRanker(k=rrf_k),
                 limit=limit,
-                output_fields=["document_id"],
+                output_fields=["chunk_id", "document_id"],
             )
             return [
-                VectorHit(chunk_id=UUID(str(row["id"])), score=float(row["distance"]))
+                VectorHit(
+                    chunk_id=UUID(str(row["entity"]["chunk_id"])),
+                    score=float(row["distance"]),
+                )
                 for row in rows[0]
             ]
         finally:

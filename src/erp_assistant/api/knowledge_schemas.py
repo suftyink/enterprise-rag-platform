@@ -2,7 +2,12 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from erp_assistant.rag.types import DocumentStatus, KnowledgeScope, SearchDecision
+from erp_assistant.rag.types import (
+    DocumentStatus,
+    IndexJobStatus,
+    KnowledgeScope,
+    SearchDecision,
+)
 
 
 class KnowledgeDocumentResponse(BaseModel):
@@ -17,6 +22,12 @@ class KnowledgeDocumentResponse(BaseModel):
     title: str
     page_count: int | None = Field(default=None, alias="pageCount")
     phase: str | None = None
+    job_status: IndexJobStatus | None = Field(default=None, alias="jobStatus")
+    attempt: int | None = None
+    chunk_count: int | None = Field(default=None, alias="chunkCount")
+    warnings: list[str] = Field(default_factory=list)
+    pipeline_revision: str | None = Field(default=None, alias="pipelineRevision")
+    cleanup_required: bool = Field(default=False, alias="cleanupRequired")
     error_code: str | None = Field(default=None, alias="errorCode")
     error_detail: str | None = Field(default=None, alias="errorDetail")
 

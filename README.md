@@ -163,7 +163,7 @@ RAG 基础设施运行后，默认通过进程内 `KnowledgeRetriever` 执行版
 uv run python -m erp_assistant.evaluation.retrieval `
   --dataset tests/fixtures/retrieval_eval.example.jsonl `
   --report retrieval-evaluation-report.json `
-  --index-identity knowledge_chunks_hybrid_v1:local
+  --index-identity knowledge_chunks_hybrid_v2:local
 ```
 
 部署后端到端验收时，显式增加 HTTP Adapter：
@@ -172,7 +172,7 @@ uv run python -m erp_assistant.evaluation.retrieval `
 uv run python -m erp_assistant.evaluation.retrieval `
   --dataset tests/fixtures/retrieval_eval.example.jsonl `
   --report retrieval-evaluation-report.json `
-  --index-identity knowledge_chunks_hybrid_v1:staging `
+  --index-identity knowledge_chunks_hybrid_v2:staging `
   --base-url http://127.0.0.1:8000
 ```
 

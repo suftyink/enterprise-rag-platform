@@ -1,7 +1,7 @@
 # Spec 03：收敛 DocumentIndexer 文档处理模块
 
 Type: spec
-Status: ready-for-agent
+Status: resolved
 Blocked by: rag-01-knowledge-retriever
 Primary test seam: `DocumentIndexer.index()`
 

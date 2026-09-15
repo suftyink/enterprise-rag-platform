@@ -40,7 +40,7 @@ from erp_assistant.rag.service import (
     latest_job,
     retry_document,
 )
-from erp_assistant.rag.types import DocumentStatus, KnowledgeScope
+from erp_assistant.rag.types import DocumentStatus, IndexJobStatus, KnowledgeScope
 from erp_assistant.workers.dispatcher import DocumentDispatcher, get_document_dispatcher
 
 router = APIRouter()
@@ -108,8 +108,14 @@ def _response(
         title=document.title,
         pageCount=document.page_count,
         phase=job.phase if job else None,
-        errorCode=document.error_code,
-        errorDetail=document.error_detail,
+        jobStatus=IndexJobStatus(job.status) if job else None,
+        attempt=job.attempt if job else None,
+        chunkCount=job.chunk_count if job else None,
+        warnings=job.warnings if job else document.parse_warnings,
+        pipelineRevision=job.pipeline_revision if job else None,
+        cleanupRequired=job.cleanup_required if job else False,
+        errorCode=(job.error_code if job and job.error_code else document.error_code),
+        errorDetail=(job.error_detail if job and job.error_detail else document.error_detail),
     )
 
 
