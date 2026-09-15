@@ -21,6 +21,7 @@ from erp_assistant.models.knowledge import (
 from erp_assistant.rag.types import DocumentStatus
 from erp_assistant.rag.vector_store import VectorHit, get_vector_store
 from erp_assistant.workers.dispatcher import get_document_dispatcher
+from tests.document_factory import make_docx
 from tests.pdf_factory import make_pdf
 
 KnowledgeApiContext = tuple[
@@ -95,8 +96,8 @@ async def knowledge_api() -> AsyncIterator[KnowledgeApiContext]:
     app.dependency_overrides[get_settings] = lambda: settings
     app.dependency_overrides[get_object_storage] = lambda: storage
     app.dependency_overrides[get_vector_store] = lambda: vector_store
-    app.dependency_overrides[get_document_dispatcher] = (
-        lambda: lambda document_id: f"task-{document_id}"
+    app.dependency_overrides[get_document_dispatcher] = lambda: (
+        lambda document_id: f"task-{document_id}"
     )
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -114,15 +115,18 @@ async def _upload(
     operator_id: str = "user-a",
     scope: str = "TENANT",
     document_key: str = "inventory-sop",
+    filename: str = "inventory.pdf",
+    media_type: str = "application/pdf",
 ) -> Response:
     return await client.post(
         "/api/assistant/v1/knowledge/documents",
         files={
             "file": (
-                "inventory.pdf",
+                filename,
                 content
-                or make_pdf(["Inventory stock policy contains enough searchable text. " * 4]),
-                "application/pdf",
+                if content is not None
+                else make_pdf(["Inventory stock policy contains enough searchable text. " * 4]),
+                media_type,
             )
         },
         data={
@@ -180,6 +184,66 @@ async def test_upload_status_and_hash_deduplication(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("filename", "media_type", "content", "document_key", "suffix"),
+    [
+        (
+            "guide.pdf",
+            "application/pdf",
+            make_pdf(["PDF policy with enough searchable content. " * 4]),
+            "pdf-guide",
+            ".pdf",
+        ),
+        (
+            "guide.docx",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            make_docx(
+                "<w:p><w:r><w:t>DOCX policy with enough searchable content.</w:t></w:r></w:p>"
+            ),
+            "docx-guide",
+            ".docx",
+        ),
+        (
+            "guide.md",
+            "text/markdown",
+            b"# Markdown policy\n\nEnough searchable content for the internal pilot.",
+            "markdown-guide",
+            ".md",
+        ),
+        (
+            "guide.html",
+            "text/html",
+            b"<!doctype html><html><body><p>HTML policy content.</p></body></html>",
+            "html-guide",
+            ".html",
+        ),
+    ],
+)
+async def test_upload_accepts_supported_content_types_independent_of_extension(
+    knowledge_api: KnowledgeApiContext,
+    filename: str,
+    media_type: str,
+    content: bytes,
+    document_key: str,
+    suffix: str,
+) -> None:
+    client, _, storage, _ = knowledge_api
+
+    response = await _upload(
+        client,
+        content=content,
+        document_key=document_key,
+        filename=f"renamed-{filename}.ignored",
+        media_type=media_type,
+    )
+
+    assert response.status_code == 202
+    assert response.json()["mediaType"] == media_type
+    assert response.json()["pageCount"] is None or media_type == "application/pdf"
+    assert any(key.endswith(f"original{suffix}") for key in storage.objects)
+
+
+@pytest.mark.asyncio
 async def test_upload_validation_and_global_gate(
     knowledge_api: KnowledgeApiContext,
 ) -> None:
@@ -190,6 +254,13 @@ async def test_upload_validation_and_global_gate(
         data={"tenantId": "tenant-a", "operatorId": "user-a"},
     )
     assert wrong_type.status_code == 415
+    mismatch = await client.post(
+        "/api/assistant/v1/knowledge/documents",
+        files={"file": ("renamed.pdf", b"# Actually markdown", "application/pdf")},
+        data={"tenantId": "tenant-a", "operatorId": "user-a"},
+    )
+    assert mismatch.status_code == 422
+    assert mismatch.json()["detail"]["code"] == "MEDIA_TYPE_MISMATCH"
     global_upload = await _upload(client, scope="GLOBAL")
     assert global_upload.status_code == 403
 
@@ -210,9 +281,7 @@ async def test_retry_failed_but_not_ocr_document(
         )
         assert previous_job is not None
         previous_job.cleanup_required = True
-        previous_job.cleanup_artifacts = [
-            {"kind": "vector_document", "document_id": str(uuid4())}
-        ]
+        previous_job.cleanup_artifacts = [{"kind": "vector_document", "document_id": str(uuid4())}]
         await session.commit()
     retried = await client.post(
         f"/api/assistant/v1/knowledge/documents/{document_id}/retry",

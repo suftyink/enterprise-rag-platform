@@ -68,18 +68,15 @@ class KnowledgeDocument(Base):
     parsed_object_key: Mapped[str | None] = mapped_column(String(512))
     vector_document_id: Mapped[UUID | None] = mapped_column(Uuid)
     page_count: Mapped[int | None] = mapped_column(Integer)
+    block_count: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     publication_status: Mapped[str] = mapped_column(
         String(32), nullable=False, default="UNPUBLISHED"
     )
-    retention_status: Mapped[str] = mapped_column(
-        String(32), nullable=False, default="RETAINED"
-    )
+    retention_status: Mapped[str] = mapped_column(String(32), nullable=False, default="RETAINED")
     governance_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    index_artifacts_present: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False
-    )
+    index_artifacts_present: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     error_code: Mapped[str | None] = mapped_column(String(64))
     error_detail: Mapped[str | None] = mapped_column(Text)
@@ -114,9 +111,13 @@ class KnowledgeChunk(Base):
     scope_id: Mapped[str] = mapped_column(String(64), nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
-    page_start: Mapped[int] = mapped_column(Integer, nullable=False)
-    page_end: Mapped[int] = mapped_column(Integer, nullable=False)
+    page_start: Mapped[int | None] = mapped_column(Integer)
+    page_end: Mapped[int | None] = mapped_column(Integer)
     section_title: Mapped[str | None] = mapped_column(String(255))
+    heading_path: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    anchor: Mapped[str | None] = mapped_column(String(255))
+    block_kind: Mapped[str] = mapped_column(String(32), nullable=False, default="PARAGRAPH")
+    source_locator: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False, default=dict)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     char_count: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -140,6 +141,11 @@ class KnowledgeIndexJob(Base):
     chunk_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     warnings: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     pipeline_revision: Mapped[str | None] = mapped_column(String(64))
+    parser_version: Mapped[str | None] = mapped_column(String(128))
+    chunking_version: Mapped[str | None] = mapped_column(String(64))
+    quality_signals: Mapped[dict[str, int | float | str]] = mapped_column(
+        JSON, nullable=False, default=dict
+    )
     source_hash: Mapped[str | None] = mapped_column(String(64))
     claim_token: Mapped[str | None] = mapped_column(String(36))
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -158,9 +164,7 @@ class KnowledgeIndexJob(Base):
 class KnowledgeCorpusHead(Base):
     __tablename__ = "knowledge_corpus_head"
     __table_args__ = (
-        UniqueConstraint(
-            "scope", "scope_id", "document_key", name="uq_knowledge_corpus_head"
-        ),
+        UniqueConstraint("scope", "scope_id", "document_key", name="uq_knowledge_corpus_head"),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
@@ -178,9 +182,7 @@ class KnowledgeCorpusHead(Base):
 
 class KnowledgeLifecycleEvent(Base):
     __tablename__ = "knowledge_lifecycle_event"
-    __table_args__ = (
-        Index("ix_knowledge_lifecycle_event_document", "document_id", "created_at"),
-    )
+    __table_args__ = (Index("ix_knowledge_lifecycle_event_document", "document_id", "created_at"),)
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     document_id: Mapped[UUID] = mapped_column(
@@ -210,9 +212,7 @@ class KnowledgeCleanupRequest(Base):
     kind: Mapped[str] = mapped_column(String(32), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    artifacts: Mapped[list[dict[str, str]]] = mapped_column(
-        JSON, nullable=False, default=list
-    )
+    artifacts: Mapped[list[dict[str, str]]] = mapped_column(JSON, nullable=False, default=list)
     error_detail: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(

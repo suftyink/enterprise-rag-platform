@@ -1,7 +1,7 @@
 # Spec 05：支持首批多格式解析与可引用 Chunk
 
 Type: spec
-Status: ready-for-agent
+Status: resolved
 Blocked by: rag-03-document-indexer, rag-04-knowledge-governance
 Primary test seam: `DocumentIndexer.index()`
 

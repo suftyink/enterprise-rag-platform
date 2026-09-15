@@ -2,7 +2,7 @@ import asyncio
 import json
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from hashlib import sha256
 from math import isfinite
 from time import perf_counter
@@ -41,12 +41,16 @@ class RetrievalEvidence:
     title: str
     scope: KnowledgeScope
     document_version: int
-    page_start: int
-    page_end: int
+    page_start: int | None
+    page_end: int | None
     section_title: str | None
     content: str
     score: float
     retrieval_rank: int
+    heading_path: tuple[str, ...] = ()
+    anchor: str | None = None
+    block_kind: str = "PARAGRAPH"
+    source_locator: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -191,6 +195,10 @@ class KnowledgeRetriever:
                         page_start=chunk.page_start,
                         page_end=chunk.page_end,
                         section_title=chunk.section_title,
+                        heading_path=tuple(chunk.heading_path),
+                        anchor=chunk.anchor,
+                        block_kind=chunk.block_kind,
+                        source_locator=chunk.source_locator,
                         content=chunk.content,
                         score=ranked_document.score,
                         retrieval_rank=retrieval_rank,

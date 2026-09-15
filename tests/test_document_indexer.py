@@ -1,4 +1,5 @@
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -31,6 +32,7 @@ from erp_assistant.rag.document_indexer import (
 from erp_assistant.rag.pdf_parser import PypdfParser
 from erp_assistant.rag.reindex import reindex_active_documents
 from erp_assistant.rag.types import DocumentStatus, IndexJobStatus
+from tests.document_factory import make_docx
 from tests.pdf_factory import make_pdf
 
 
@@ -131,6 +133,15 @@ class BlockingFirstEmbeddingProvider(FakeEmbeddingProvider):
         return await super().embed(texts)
 
 
+class BatchRecordingEmbeddingProvider(FakeEmbeddingProvider):
+    def __init__(self) -> None:
+        self.batch_sizes: list[int] = []
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        self.batch_sizes.append(len(texts))
+        return await super().embed(texts)
+
+
 class SimulatedWorkerLoss(BaseException):
     pass
 
@@ -160,6 +171,7 @@ def _indexer(
     vectors: MemoryVectorWriter,
     embedding: EmbeddingProvider | None = None,
     lease_seconds: int = 900,
+    settings: Settings | None = None,
 ) -> DocumentIndexer:
     return DocumentIndexer(
         session_factory=factory,
@@ -167,7 +179,8 @@ def _indexer(
         parser=PypdfParser(),
         embedding=embedding or FakeEmbeddingProvider(),
         vector_writer=vectors,
-        settings=Settings(
+        settings=settings
+        or Settings(
             rag_enabled=True,
             knowledge_min_text_per_page=5,
             knowledge_chunk_target=120,
@@ -186,9 +199,14 @@ async def _add_document(
     content: bytes,
     status: DocumentStatus,
     active: bool,
+    media_type: str = "application/pdf",
+    filename: str = "inventory.pdf",
 ) -> KnowledgeDocument:
     document_id = uuid4()
-    object_key = f"knowledge/tenant/tenant-a/inventory-sop/v{version}/{document_id}/original.pdf"
+    suffix = Path(filename).suffix or ".bin"
+    object_key = (
+        f"knowledge/tenant/tenant-a/inventory-sop/v{version}/{document_id}/original{suffix}"
+    )
     document = KnowledgeDocument(
         id=document_id,
         scope="TENANT",
@@ -197,8 +215,8 @@ async def _add_document(
         document_key="inventory-sop",
         version=version,
         title="Inventory SOP",
-        original_filename="inventory.pdf",
-        media_type="application/pdf",
+        original_filename=filename,
+        media_type=media_type,
         size_bytes=len(content),
         sha256=f"{version:064x}",
         object_key=object_key,
@@ -223,6 +241,364 @@ async def _add_document(
         await session.commit()
     storage.objects[object_key] = content
     return document
+
+
+@pytest.mark.asyncio
+async def test_index_markdown_preserves_structure_identifiers_and_versions(
+    indexer_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    storage = MemoryStorage()
+    vectors = MemoryVectorWriter()
+    content = (
+        b"# Fulfillment Guide\n\n"
+        b"## Packaging\n\n"
+        b"Use SKU-ABC-42 cartons with 12.5 kg capacity.\n\n"
+        b"- Keep API labels visible\n"
+        b"- Record lot 2026-09\n\n"
+        b"```sql\nSELECT sku FROM inventory_2026;\n```\n"
+    )
+    document = await _add_document(
+        indexer_factory,
+        storage,
+        version=1,
+        content=content,
+        status=DocumentStatus.QUEUED,
+        active=False,
+        media_type="text/markdown",
+        filename="fulfillment.md",
+    )
+
+    outcome = await _indexer(indexer_factory, storage, vectors).index(document.id)
+
+    async with indexer_factory() as session:
+        stored = await session.get_one(KnowledgeDocument, document.id)
+        chunks = list(
+            (
+                await session.scalars(
+                    select(KnowledgeChunk)
+                    .where(KnowledgeChunk.document_id == document.id)
+                    .order_by(KnowledgeChunk.chunk_index)
+                )
+            ).all()
+        )
+        job = await session.scalar(
+            select(KnowledgeIndexJob).where(KnowledgeIndexJob.document_id == document.id)
+        )
+    assert outcome.decision is IndexDecision.INDEXED_FOR_CURRENT_POLICY
+    assert stored.publication_status == "REVIEW_PENDING"
+    assert "SKU-ABC-42" in "\n".join(chunk.content for chunk in chunks)
+    assert "12.5 kg" in "\n".join(chunk.content for chunk in chunks)
+    assert "SELECT sku FROM inventory_2026" in "\n".join(chunk.content for chunk in chunks)
+    packaging = next(chunk for chunk in chunks if "SKU-ABC-42" in chunk.content)
+    assert packaging.heading_path == ["Fulfillment Guide", "Packaging"]
+    assert packaging.page_start is None
+    assert packaging.source_locator["headingPath"] == packaging.heading_path
+    assert packaging.source_locator["blockStart"] >= 0
+    assert job is not None
+    assert job.parser_version == "markdown-v1"
+    assert job.chunking_version == "structured-window-v1"
+    assert job.quality_signals["blockCount"] >= 4
+    parsed_key = next(key for key in storage.objects if key.endswith("parsed/document.json"))
+    parsed = json.loads(storage.objects[parsed_key])
+    assert parsed["blocks"][0]["kind"] == "HEADING"
+    assert parsed["blocks"][0]["locator"]["headingPath"] == ["Fulfillment Guide"]
+
+
+@pytest.mark.asyncio
+async def test_index_docx_preserves_headings_lists_tables_and_identifiers(
+    indexer_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    storage = MemoryStorage()
+    vectors = MemoryVectorWriter()
+    content = make_docx(
+        """
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Returns</w:t></w:r></w:p>
+        <w:p><w:pPr><w:numPr/></w:pPr><w:r><w:t>Inspect SKU-Z9 within 48 h</w:t></w:r></w:p>
+        <w:tbl><w:tr>
+          <w:tc><w:p><w:r><w:t>Limit</w:t></w:r></w:p></w:tc>
+          <w:tc><w:p><w:r><w:t>25.5 kg</w:t></w:r></w:p></w:tc>
+        </w:tr></w:tbl>
+        <w:p><w:r><w:t>Keep the RMA identifier visible for every shipment.</w:t></w:r></w:p>
+        """
+    )
+    document = await _add_document(
+        indexer_factory,
+        storage,
+        version=1,
+        content=content,
+        status=DocumentStatus.QUEUED,
+        active=False,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        filename="returns.docx",
+    )
+
+    outcome = await _indexer(indexer_factory, storage, vectors).index(document.id)
+
+    async with indexer_factory() as session:
+        chunks = list(
+            (
+                await session.scalars(
+                    select(KnowledgeChunk)
+                    .where(KnowledgeChunk.document_id == document.id)
+                    .order_by(KnowledgeChunk.chunk_index)
+                )
+            ).all()
+        )
+        job = await session.scalar(
+            select(KnowledgeIndexJob).where(KnowledgeIndexJob.document_id == document.id)
+        )
+    assert outcome.decision is IndexDecision.INDEXED_FOR_CURRENT_POLICY
+    combined = "\n".join(chunk.content for chunk in chunks)
+    assert "SKU-Z9" in combined
+    assert "25.5 kg" in combined
+    assert "RMA" in combined
+    assert chunks[0].source_locator["blockStart"] == 0
+    assert chunks[-1].source_locator["blockEnd"] == 3
+    assert all(chunk.heading_path == ["Returns"] for chunk in chunks)
+    assert job is not None and job.parser_version == "docx-v1"
+
+
+@pytest.mark.asyncio
+async def test_index_html_removes_active_noise_and_preserves_anchor_context(
+    indexer_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    storage = MemoryStorage()
+    vectors = MemoryVectorWriter()
+    content = b"""<!doctype html><html><body>
+      <nav>Secret navigation noise</nav>
+      <h1 id="fees">Marketplace Fees</h1>
+      <p>Use <a href="/fee-table">the fee table</a> for SKU-A1 at 7.25 USD.</p>
+      <p hidden>Invisible dangerous guidance</p>
+      <img hidden src="tracking.png">
+      <script>alert('do not index')</script>
+      <style>.hidden { display: none }</style>
+      <h2 id="refunds">Refunds</h2>
+      <p>Keep the VAT identifier and process refunds within 48 h.</p>
+    </body></html>"""
+    document = await _add_document(
+        indexer_factory,
+        storage,
+        version=1,
+        content=content,
+        status=DocumentStatus.QUEUED,
+        active=False,
+        media_type="text/html",
+        filename="fees.html",
+    )
+
+    outcome = await _indexer(indexer_factory, storage, vectors).index(document.id)
+
+    async with indexer_factory() as session:
+        chunks = list(
+            (
+                await session.scalars(
+                    select(KnowledgeChunk)
+                    .where(KnowledgeChunk.document_id == document.id)
+                    .order_by(KnowledgeChunk.chunk_index)
+                )
+            ).all()
+        )
+        job = await session.scalar(
+            select(KnowledgeIndexJob).where(KnowledgeIndexJob.document_id == document.id)
+        )
+    assert outcome.decision is IndexDecision.INDEXED_FOR_CURRENT_POLICY
+    combined = "\n".join(chunk.content for chunk in chunks)
+    assert "the fee table" in combined
+    assert "SKU-A1" in combined and "7.25 USD" in combined and "VAT" in combined
+    assert "Secret navigation noise" not in combined
+    assert "Invisible dangerous guidance" not in combined
+    assert "do not index" not in combined
+    fee_chunk = next(chunk for chunk in chunks if "SKU-A1" in chunk.content)
+    assert fee_chunk.heading_path == ["Marketplace Fees"]
+    assert fee_chunk.anchor == "fees"
+    assert fee_chunk.source_locator["anchor"] == "fees"
+    refund_chunk = next(chunk for chunk in chunks if "VAT" in chunk.content)
+    assert refund_chunk.heading_path == ["Marketplace Fees", "Refunds"]
+    assert refund_chunk.anchor == "refunds"
+    assert job is not None and job.parser_version == "html-v1"
+    assert set(job.warnings) == {
+        "HTML_ACTIVE_CONTENT_REMOVED",
+        "HTML_HIDDEN_CONTENT_REMOVED",
+        "HTML_NAVIGATION_REMOVED",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("media_type", "filename", "content", "error_code"),
+    [
+        (
+            "application/pdf",
+            "renamed.pdf",
+            b"# This is actually markdown content",
+            "MEDIA_TYPE_MISMATCH",
+        ),
+        (
+            "text/markdown",
+            "renamed.md",
+            b"<!doctype html><html><body><p>This is actually HTML.</p></body></html>",
+            "MEDIA_TYPE_MISMATCH",
+        ),
+        (
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "encrypted.docx",
+            b"\xd0\xcf\x11\xe0" + b"encrypted office document",
+            "ENCRYPTED_DOCX",
+        ),
+        (
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "damaged.docx",
+            b"PK damaged archive",
+            "INVALID_DOCX",
+        ),
+        ("text/markdown", "empty.md", b"", "EMPTY_DOCUMENT"),
+        ("text/markdown", "short.md", b"tiny", "TEXT_QUALITY_TOO_LOW"),
+        ("application/octet-stream", "data.bin", b"binary content", "UNSUPPORTED_MEDIA_TYPE"),
+    ],
+)
+async def test_index_classifies_invalid_and_deceptive_inputs(
+    indexer_factory: async_sessionmaker[AsyncSession],
+    media_type: str,
+    filename: str,
+    content: bytes,
+    error_code: str,
+) -> None:
+    storage = MemoryStorage()
+    vectors = MemoryVectorWriter()
+    document = await _add_document(
+        indexer_factory,
+        storage,
+        version=1,
+        content=content,
+        status=DocumentStatus.QUEUED,
+        active=False,
+        media_type=media_type,
+        filename=filename,
+    )
+
+    outcome = await _indexer(indexer_factory, storage, vectors).index(document.id)
+
+    assert outcome.decision is IndexDecision.PERMANENT_FAILURE
+    assert outcome.error_code == error_code
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("content", "settings", "error_code"),
+    [
+        (
+            b"# One\n\n## Two\n\n### Three\n\nEnough body text for a valid document.",
+            Settings(knowledge_max_blocks=2, knowledge_min_text_characters=1),
+            "TOO_MANY_BLOCKS",
+        ),
+        (
+            b"# Oversized content that is otherwise valid",
+            Settings(knowledge_max_file_size=10, knowledge_min_text_characters=1),
+            "FILE_TOO_LARGE",
+        ),
+    ],
+)
+async def test_index_enforces_common_resource_limits(
+    indexer_factory: async_sessionmaker[AsyncSession],
+    content: bytes,
+    settings: Settings,
+    error_code: str,
+) -> None:
+    storage = MemoryStorage()
+    document = await _add_document(
+        indexer_factory,
+        storage,
+        version=1,
+        content=content,
+        status=DocumentStatus.QUEUED,
+        active=False,
+        media_type="text/markdown",
+        filename="limits.md",
+    )
+
+    outcome = await _indexer(
+        indexer_factory,
+        storage,
+        MemoryVectorWriter(),
+        settings=settings,
+    ).index(document.id)
+
+    assert outcome.decision is IndexDecision.PERMANENT_FAILURE
+    assert outcome.error_code == error_code
+
+
+@pytest.mark.asyncio
+async def test_index_rejects_docx_decompression_limit(
+    indexer_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    storage = MemoryStorage()
+    document = await _add_document(
+        indexer_factory,
+        storage,
+        version=1,
+        content=make_docx(f"<w:p><w:r><w:t>{'A' * 1_000}</w:t></w:r></w:p>"),
+        status=DocumentStatus.QUEUED,
+        active=False,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        filename="large.docx",
+    )
+    settings = Settings(
+        knowledge_max_uncompressed_size=100,
+        knowledge_max_compression_ratio=10_000,
+        knowledge_min_text_characters=1,
+    )
+
+    outcome = await _indexer(
+        indexer_factory,
+        storage,
+        MemoryVectorWriter(),
+        settings=settings,
+    ).index(document.id)
+
+    assert outcome.decision is IndexDecision.PERMANENT_FAILURE
+    assert outcome.error_code == "DECOMPRESSION_LIMIT_EXCEEDED"
+
+
+@pytest.mark.asyncio
+async def test_index_batches_chunks_with_configured_resource_bound(
+    indexer_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    storage = MemoryStorage()
+    content = "\n\n".join(
+        f"## Section {index}\n\n"
+        f"Policy item {index} contains enough searchable text and SKU-{index}."
+        for index in range(6)
+    ).encode()
+    document = await _add_document(
+        indexer_factory,
+        storage,
+        version=1,
+        content=content,
+        status=DocumentStatus.QUEUED,
+        active=False,
+        media_type="text/markdown",
+        filename="batched.md",
+    )
+    embedding = BatchRecordingEmbeddingProvider()
+    settings = Settings(
+        knowledge_chunk_target=60,
+        knowledge_chunk_max=100,
+        knowledge_chunk_overlap=10,
+        knowledge_embedding_batch_size=2,
+    )
+
+    outcome = await _indexer(
+        indexer_factory,
+        storage,
+        MemoryVectorWriter(),
+        embedding=embedding,
+        settings=settings,
+    ).index(document.id)
+
+    assert outcome.decision is IndexDecision.INDEXED_FOR_CURRENT_POLICY
+    assert outcome.chunk_count > 2
+    assert embedding.batch_sizes
+    assert max(embedding.batch_sizes) <= 2
 
 
 @pytest.mark.asyncio
@@ -261,9 +637,7 @@ async def test_index_indexes_pdf_without_publishing_new_version(
     async with indexer_factory() as session:
         documents = list(
             (
-                await session.scalars(
-                    select(KnowledgeDocument).order_by(KnowledgeDocument.version)
-                )
+                await session.scalars(select(KnowledgeDocument).order_by(KnowledgeDocument.version))
             ).all()
         )
         chunks = list(
@@ -288,9 +662,12 @@ async def test_index_indexes_pdf_without_publishing_new_version(
     assert job.phase == DocumentStatus.READY.value
     assert job.chunk_count == outcome.chunk_count
     assert job.pipeline_revision == outcome.pipeline.revision
+    assert job.parser_version == "pypdf-v1"
+    assert job.chunking_version == "structured-window-v1"
+    assert chunks[0].source_locator["pageStart"] == 1
     assert old.id not in vectors.deleted
     assert documents[1].vector_document_id in vectors.documents
-    assert any(key.endswith("parsed/pages.json") for key in storage.objects)
+    assert any(key.endswith("parsed/document.json") for key in storage.objects)
 
 
 @pytest.mark.asyncio
@@ -781,9 +1158,7 @@ async def test_index_persists_cleanup_intent_before_external_delete(
     assert stored_new.active is True
     assert stored_new.status == DocumentStatus.READY.value
     assert job is not None and job.cleanup_required is True
-    assert job.cleanup_artifacts == [
-        {"kind": "vector_document", "document_id": str(new.id)}
-    ]
+    assert job.cleanup_artifacts == [{"kind": "vector_document", "document_id": str(new.id)}]
 
 
 @pytest.mark.asyncio
@@ -879,9 +1254,7 @@ async def test_active_reindex_vector_failure_preserves_old_chunks_and_vectors(
         old_chunk_ids = list(
             (
                 await session.scalars(
-                    select(KnowledgeChunk.id).where(
-                        KnowledgeChunk.document_id == document.id
-                    )
+                    select(KnowledgeChunk.id).where(KnowledgeChunk.document_id == document.id)
                 )
             ).all()
         )
@@ -900,9 +1273,7 @@ async def test_active_reindex_vector_failure_preserves_old_chunks_and_vectors(
         current_chunk_ids = list(
             (
                 await session.scalars(
-                    select(KnowledgeChunk.id).where(
-                        KnowledgeChunk.document_id == document.id
-                    )
+                    select(KnowledgeChunk.id).where(KnowledgeChunk.document_id == document.id)
                 )
             ).all()
         )

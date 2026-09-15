@@ -115,6 +115,9 @@ class CorpusDocumentView:
     retrieval_eligible: bool
     warnings: tuple[str, ...]
     pipeline_revision: str | None
+    parser_version: str | None
+    chunking_version: str | None
+    quality_signals: dict[str, int | float | str]
     chunk_summary: CorpusChunkSummary
     audit_events: tuple[CorpusAuditEvent, ...]
     cleanup_requests: tuple[CorpusCleanup, ...]
@@ -129,6 +132,9 @@ class CorpusDocumentView:
             "retrievalEligible": self.retrieval_eligible,
             "warnings": list(self.warnings),
             "pipelineRevision": self.pipeline_revision,
+            "parserVersion": self.parser_version,
+            "chunkingVersion": self.chunking_version,
+            "qualitySignals": self.quality_signals,
         }
 
 

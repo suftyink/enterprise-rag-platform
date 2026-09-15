@@ -278,6 +278,9 @@ class KnowledgeCorpus:
             retrieval_eligible=is_retrieval_eligible(document),
             warnings=tuple(job.warnings if job is not None else document.parse_warnings),
             pipeline_revision=job.pipeline_revision if job is not None else None,
+            parser_version=job.parser_version if job is not None else None,
+            chunking_version=job.chunking_version if job is not None else None,
+            quality_signals=job.quality_signals if job is not None else {},
             chunk_summary=CorpusChunkSummary(
                 chunk_count=int(chunk_row[0]),
                 character_count=int(chunk_row[1]),

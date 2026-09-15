@@ -15,9 +15,7 @@ from erp_assistant.rag.retriever import RetrievalEvidence
 from erp_assistant.rag.types import SearchDecision
 
 
-def calculate_metrics(
-    observed_cases: list[ObservedCase], case_count: int
-) -> EvaluationMetrics:
+def calculate_metrics(observed_cases: list[ObservedCase], case_count: int) -> EvaluationMetrics:
     expected_sources = 0
     retrieved_sources = 0
     reciprocal_ranks: list[float] = []
@@ -52,19 +50,11 @@ def calculate_metrics(
                 relevance.append(int(matched_source is not None))
                 if matched_source is not None:
                     matched_sources.add(matched_source)
-            first_rank = next(
-                (index for index, value in enumerate(relevance, 1) if value), None
-            )
+            first_rank = next((index for index, value in enumerate(relevance, 1) if value), None)
             reciprocal_ranks.append(0.0 if first_rank is None else 1.0 / first_rank)
-            dcg = sum(
-                value / math.log2(index + 1)
-                for index, value in enumerate(relevance, 1)
-            )
+            dcg = sum(value / math.log2(index + 1) for index, value in enumerate(relevance, 1))
             ideal_count = min(len(observed.case.expected_sources), 5)
-            ideal_dcg = sum(
-                1.0 / math.log2(index + 1)
-                for index in range(1, ideal_count + 1)
-            )
+            ideal_dcg = sum(1.0 / math.log2(index + 1) for index in range(1, ideal_count + 1))
             ndcg_scores.append(0.0 if ideal_dcg == 0 else dcg / ideal_dcg)
         leakage_count += sum(
             item.document_key in observed.case.forbidden_document_keys for item in evidence
@@ -73,20 +63,12 @@ def calculate_metrics(
     return EvaluationMetrics(
         case_count=case_count,
         evaluated_case_count=len(observed_cases),
-        recall_at_5=(
-            round(retrieved_sources / expected_sources, 4) if expected_sources else None
-        ),
+        recall_at_5=(round(retrieved_sources / expected_sources, 4) if expected_sources else None),
         mrr_at_5=(
-            round(sum(reciprocal_ranks) / len(reciprocal_ranks), 4)
-            if reciprocal_ranks
-            else None
+            round(sum(reciprocal_ranks) / len(reciprocal_ranks), 4) if reciprocal_ranks else None
         ),
-        ndcg_at_5=(
-            round(sum(ndcg_scores) / len(ndcg_scores), 4) if ndcg_scores else None
-        ),
-        refusal_accuracy=(
-            round(refusal_correct / refusal_total, 4) if refusal_total else None
-        ),
+        ndcg_at_5=(round(sum(ndcg_scores) / len(ndcg_scores), 4) if ndcg_scores else None),
+        refusal_accuracy=(round(refusal_correct / refusal_total, 4) if refusal_total else None),
         tenant_leakage_count=leakage_count,
         latency_p50_ms=_percentile(latencies, 0.50),
         latency_p95_ms=_percentile(latencies, 0.95),
@@ -127,11 +109,7 @@ def build_gate(
         indeterminate_reasons.append("NON_BUSINESS_CASES")
     if any(not case.reviewed for case in cases):
         indeterminate_reasons.append("UNREVIEWED_CASES")
-    if (
-        metrics.recall_at_5 is None
-        or metrics.mrr_at_5 is None
-        or metrics.refusal_accuracy is None
-    ):
+    if metrics.recall_at_5 is None or metrics.mrr_at_5 is None or metrics.refusal_accuracy is None:
         indeterminate_reasons.append("REQUIRED_METRICS_UNAVAILABLE")
     if indeterminate_reasons:
         return QualityGate(
@@ -151,6 +129,8 @@ def build_gate(
 def _is_relevant(evidence: RetrievalEvidence, source: RelevantSource) -> bool:
     return (
         evidence.document_key == source.document_key
+        and evidence.page_start is not None
+        and evidence.page_end is not None
         and evidence.page_start <= source.page_end
         and evidence.page_end >= source.page_start
     )

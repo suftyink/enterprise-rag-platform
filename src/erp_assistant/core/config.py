@@ -29,10 +29,15 @@ class Settings(BaseSettings):
     rag_rerank_threshold: float = 0.10
     knowledge_max_file_size: int = 20 * 1024 * 1024
     knowledge_max_pages: int = 200
+    knowledge_max_blocks: int = 5_000
+    knowledge_max_uncompressed_size: int = 64 * 1024 * 1024
+    knowledge_max_compression_ratio: int = 100
+    knowledge_min_text_characters: int = 40
     knowledge_chunk_target: int = 600
     knowledge_chunk_max: int = 900
     knowledge_chunk_overlap: int = 100
     knowledge_min_text_per_page: int = 20
+    knowledge_embedding_batch_size: int = 64
     knowledge_index_lease_seconds: int = 900
     allow_global_knowledge_upload: bool = False
     global_knowledge_operator_ids: str = ""

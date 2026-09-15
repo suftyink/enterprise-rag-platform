@@ -26,13 +26,20 @@ class KnowledgeDocumentResponse(BaseModel):
     retrieval_eligible: bool = Field(alias="retrievalEligible")
     duplicate: bool = False
     title: str
+    media_type: str = Field(alias="mediaType")
     page_count: int | None = Field(default=None, alias="pageCount")
+    block_count: int | None = Field(default=None, alias="blockCount")
     phase: str | None = None
     job_status: IndexJobStatus | None = Field(default=None, alias="jobStatus")
     attempt: int | None = None
     chunk_count: int | None = Field(default=None, alias="chunkCount")
     warnings: list[str] = Field(default_factory=list)
     pipeline_revision: str | None = Field(default=None, alias="pipelineRevision")
+    parser_version: str | None = Field(default=None, alias="parserVersion")
+    chunking_version: str | None = Field(default=None, alias="chunkingVersion")
+    quality_signals: dict[str, int | float | str] = Field(
+        default_factory=dict, alias="qualitySignals"
+    )
     cleanup_required: bool = Field(default=False, alias="cleanupRequired")
     error_code: str | None = Field(default=None, alias="errorCode")
     error_detail: str | None = Field(default=None, alias="errorDetail")
@@ -59,9 +66,13 @@ class KnowledgeSearchResult(BaseModel):
     title: str
     scope: KnowledgeScope
     version: int
-    page_start: int = Field(alias="pageStart")
-    page_end: int = Field(alias="pageEnd")
+    page_start: int | None = Field(alias="pageStart")
+    page_end: int | None = Field(alias="pageEnd")
     section_title: str | None = Field(default=None, alias="sectionTitle")
+    heading_path: list[str] = Field(default_factory=list, alias="headingPath")
+    anchor: str | None = None
+    block_kind: str = Field(alias="blockKind")
+    source_locator: dict[str, object] = Field(default_factory=dict, alias="sourceLocator")
     content: str
     score: float
     retrieval_rank: int = Field(alias="retrievalRank")

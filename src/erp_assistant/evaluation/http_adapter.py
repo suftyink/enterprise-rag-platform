@@ -51,12 +51,18 @@ class HttpRetrievalAdapter:
                     title=item["title"],
                     scope=KnowledgeScope(item["scope"]),
                     document_version=int(item["version"]),
-                    page_start=int(item["pageStart"]),
-                    page_end=int(item["pageEnd"]),
+                    page_start=(
+                        int(item["pageStart"]) if item.get("pageStart") is not None else None
+                    ),
+                    page_end=(int(item["pageEnd"]) if item.get("pageEnd") is not None else None),
                     section_title=item.get("sectionTitle"),
                     content=item["content"],
                     score=float(item["score"]),
                     retrieval_rank=int(item["retrievalRank"]),
+                    heading_path=tuple(item.get("headingPath", [])),
+                    anchor=item.get("anchor"),
+                    block_kind=item.get("blockKind", "PARAGRAPH"),
+                    source_locator=item.get("sourceLocator", {}),
                 )
                 for item in payload["results"]
             )

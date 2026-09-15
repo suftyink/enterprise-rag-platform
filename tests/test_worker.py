@@ -73,6 +73,9 @@ async def test_index_worker_returns_the_corpus_outcome() -> None:
         retrieval_eligible=False,
         warnings=("PAGE_1_NO_TEXT",),
         pipeline_revision="a" * 64,
+        parser_version="pypdf-v1",
+        chunking_version="structured-window-v1",
+        quality_signals={"qualityScore": 0.95},
         chunk_summary=CorpusChunkSummary(
             chunk_count=0,
             character_count=0,

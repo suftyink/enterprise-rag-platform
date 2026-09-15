@@ -16,10 +16,16 @@ from erp_assistant.core.config import Settings
 from erp_assistant.infrastructure.object_storage import ObjectStorage
 from erp_assistant.models.knowledge import KnowledgeChunk, KnowledgeDocument, KnowledgeIndexJob
 from erp_assistant.orchestration.providers import EmbeddingProvider
-from erp_assistant.rag.chunker import ChunkDraft, chunk_pages
-from erp_assistant.rag.errors import OcrRequiredError, PdfValidationError, RagDependencyError
+from erp_assistant.rag.chunker import (
+    CHUNK_STRATEGY_VERSION,
+    ChunkDraft,
+    chunk_document,
+)
+from erp_assistant.rag.document_parsers import DocumentParserRouter
+from erp_assistant.rag.errors import DocumentValidationError, OcrRequiredError, RagDependencyError
+from erp_assistant.rag.parsed_document import ParserLimits
 from erp_assistant.rag.pdf_parser import PdfParser
-from erp_assistant.rag.types import DocumentStatus, IndexJobStatus
+from erp_assistant.rag.types import DocumentStatus, IndexJobStatus, PublicationStatus
 
 
 def utc_now() -> datetime:
@@ -100,14 +106,16 @@ class DocumentIndexer:
         *,
         session_factory: async_sessionmaker[AsyncSession],
         storage: ObjectStorage,
-        parser: PdfParser,
+        parser: PdfParser | DocumentParserRouter,
         embedding: EmbeddingProvider,
         vector_writer: VectorWriter,
         settings: Settings,
     ) -> None:
         self._sessions = session_factory
         self._storage = storage
-        self._parser = parser
+        self._parser = (
+            parser if isinstance(parser, DocumentParserRouter) else DocumentParserRouter(parser)
+        )
         self._embedding = embedding
         self._vectors = vector_writer
         self._settings = settings
@@ -172,6 +180,11 @@ class DocumentIndexer:
                             started_at=claimed_at,
                             finished_at=None,
                             pipeline_revision=self.pipeline.revision,
+                            parser_version=self._parser.parser_version(document.media_type),
+                            chunking_version=CHUNK_STRATEGY_VERSION,
+                            quality_signals={},
+                            warnings=[],
+                            chunk_count=0,
                             source_hash=source_hash,
                             claim_token=claim_token,
                             lease_expires_at=lease_until,
@@ -220,21 +233,21 @@ class DocumentIndexer:
                 failure_code = "PARSER_FAILED"
                 parsed = await asyncio.to_thread(
                     self._parser.parse,
+                    document.media_type,
                     content,
-                    self._settings.knowledge_min_text_per_page,
+                    self._parser_limits(),
                 )
-                parsed_key = (
-                    document.object_key.removesuffix("original.pdf") + "parsed/pages.json"
-                )
+                parsed_key = document.object_key.rsplit("/", 1)[0] + "/parsed/document.json"
                 parsed_content = json.dumps(
                     {
                         "documentId": str(document.id),
                         "version": document.version,
-                        "warnings": parsed.warnings,
-                        "pages": [
-                            {"pageNumber": page.page_number, "text": page.text}
-                            for page in parsed.pages
-                        ],
+                        "mediaType": document.media_type,
+                        "parserVersion": parsed.parser_version,
+                        "chunkingVersion": CHUNK_STRATEGY_VERSION,
+                        "warnings": list(parsed.warnings),
+                        "qualitySignals": parsed.quality_signals,
+                        "blocks": [block.to_dict() for block in parsed.blocks],
                     },
                     ensure_ascii=False,
                 ).encode("utf-8")
@@ -246,47 +259,47 @@ class DocumentIndexer:
                     "application/json; charset=utf-8",
                 )
                 document.parsed_object_key = parsed_key
-                document.page_count = len(parsed.pages)
-                document.parse_warnings = parsed.warnings
+                document.page_count = parsed.page_count
+                document.block_count = len(parsed.blocks)
+                document.parse_warnings = list(parsed.warnings)
                 if not was_active:
                     document.status = DocumentStatus.CHUNKING.value
                 job.phase = DocumentStatus.CHUNKING.value
                 phase = DocumentStatus.CHUNKING
                 failure_code = "DATABASE_WRITE_FAILED"
-                await self._commit_claimed(
-                    session, job_id, attempt, claim_token
-                )
+                await self._commit_claimed(session, job_id, attempt, claim_token)
 
-                drafts = chunk_pages(
+                drafts = chunk_document(
                     document.id,
-                    parsed.pages,
+                    parsed,
                     self._settings.knowledge_chunk_target,
                     self._settings.knowledge_chunk_max,
                     self._settings.knowledge_chunk_overlap,
                 )
                 if not drafts:
-                    raise OcrRequiredError("OCR_REQUIRED", "PDF 未生成有效文本 Chunk")
+                    raise DocumentValidationError("EMPTY_DOCUMENT", "文档未生成有效文本 Chunk")
                 if not was_active:
                     await session.execute(
-                        delete(KnowledgeChunk).where(
-                            KnowledgeChunk.document_id == document.id
-                        )
+                        delete(KnowledgeChunk).where(KnowledgeChunk.document_id == document.id)
                     )
-                    session.add_all(
-                        [self._chunk_model(document, draft) for draft in drafts]
-                    )
+                    session.add_all([self._chunk_model(document, draft) for draft in drafts])
                 if not was_active:
                     document.status = DocumentStatus.INDEXING.value
                 job.phase = DocumentStatus.INDEXING.value
                 job.chunk_count = len(drafts)
                 job.warnings = list(parsed.warnings)
+                job.parser_version = parsed.parser_version
+                job.chunking_version = CHUNK_STRATEGY_VERSION
+                job.quality_signals = parsed.quality_signals
                 phase = DocumentStatus.INDEXING
-                await self._commit_claimed(
-                    session, job_id, attempt, claim_token
-                )
+                await self._commit_claimed(session, job_id, attempt, claim_token)
 
                 failure_code = "EMBEDDING_FAILED"
-                vectors = await self._embedding.embed([draft.content for draft in drafts])
+                vectors: list[list[float]] = []
+                batch_size = max(1, self._settings.knowledge_embedding_batch_size)
+                for start in range(0, len(drafts), batch_size):
+                    batch = drafts[start : start + batch_size]
+                    vectors.extend(await self._embedding.embed([draft.content for draft in batch]))
                 await self._renew_claim(session, job_id, attempt, claim_token)
                 failure_code = "VECTOR_WRITE_FAILED"
                 vector_document_id = stage_document_id
@@ -303,23 +316,19 @@ class DocumentIndexer:
                 failure_code = "DATABASE_WRITE_FAILED"
                 if was_active:
                     await session.execute(
-                        delete(KnowledgeChunk).where(
-                            KnowledgeChunk.document_id == document.id
-                        )
+                        delete(KnowledgeChunk).where(KnowledgeChunk.document_id == document.id)
                     )
-                    session.add_all(
-                        [self._chunk_model(document, draft) for draft in drafts]
-                    )
+                    session.add_all([self._chunk_model(document, draft) for draft in drafts])
                 cleanup_ids: list[UUID] = []
                 if was_active:
                     cleanup_ids.append(document.vector_document_id or document.id)
                 cleanup_ids = [
-                    cleanup_id
-                    for cleanup_id in cleanup_ids
-                    if cleanup_id != vector_document_id
+                    cleanup_id for cleanup_id in cleanup_ids if cleanup_id != vector_document_id
                 ]
                 document.active = was_active
                 document.status = DocumentStatus.READY.value
+                if not was_active:
+                    document.publication_status = PublicationStatus.REVIEW_PENDING.value
                 document.vector_document_id = vector_document_id
                 document.index_artifacts_present = True
                 document.indexed_at = utc_now()
@@ -333,9 +342,7 @@ class DocumentIndexer:
                     {"kind": "vector_document", "document_id": str(cleanup_id)}
                     for cleanup_id in cleanup_ids
                 ]
-                await self._commit_claimed(
-                    session, job_id, attempt, claim_token, release=True
-                )
+                await self._commit_claimed(session, job_id, attempt, claim_token, release=True)
 
                 await self._cleanup_pending(job)
                 return self._outcome(
@@ -370,7 +377,7 @@ class DocumentIndexer:
                 return await self._outcome_from_ids(
                     document_id, job_id, IndexDecision.OCR_REQUIRED, exc.code
                 )
-            except PdfValidationError as exc:
+            except DocumentValidationError as exc:
                 await session.rollback()
                 try:
                     persisted = await self._persist_terminal(
@@ -400,9 +407,7 @@ class DocumentIndexer:
                 await session.rollback()
                 if vector_dirty:
                     try:
-                        await asyncio.to_thread(
-                            self._vectors.delete_document, stage_document_id
-                        )
+                        await asyncio.to_thread(self._vectors.delete_document, stage_document_id)
                     except Exception:
                         pass
                 return await self._outcome_from_ids(
@@ -458,8 +463,8 @@ class DocumentIndexer:
             f"overlap={self._settings.knowledge_chunk_overlap}"
         )
         values = {
-            "parser": self._parser.version,
-            "chunking": chunking,
+            "parser": self._parser.identity,
+            "chunking": f"{CHUNK_STRATEGY_VERSION};{chunking}",
             "embedding": f"{self._embedding.model}:{self._embedding.dimension}",
             "vector_index": self._vectors.identity,
         }
@@ -513,15 +518,12 @@ class DocumentIndexer:
             raise _IndexLeaseLost
         await session.commit()
 
-    def _is_current(
-        self, document: KnowledgeDocument, job: KnowledgeIndexJob
-    ) -> bool:
+    def _is_current(self, document: KnowledgeDocument, job: KnowledgeIndexJob) -> bool:
         return (
             job.status == IndexJobStatus.SUCCEEDED.value
             and job.source_hash == document.sha256
             and job.pipeline_revision == self.pipeline.revision
-            and document.status
-            in {DocumentStatus.READY.value, DocumentStatus.SUPERSEDED.value}
+            and document.status in {DocumentStatus.READY.value, DocumentStatus.SUPERSEDED.value}
         )
 
     def _outcome(
@@ -583,9 +585,7 @@ class DocumentIndexer:
         async with self._sessions() as session:
             document = await session.get_one(KnowledgeDocument, document_id)
             job = await session.scalar(
-                select(KnowledgeIndexJob)
-                .where(KnowledgeIndexJob.id == job_id)
-                .with_for_update()
+                select(KnowledgeIndexJob).where(KnowledgeIndexJob.id == job_id).with_for_update()
             )
             if job is None:
                 return False
@@ -627,9 +627,7 @@ class DocumentIndexer:
         async with self._sessions() as session:
             document = await session.get_one(KnowledgeDocument, document_id)
             job = await session.scalar(
-                select(KnowledgeIndexJob)
-                .where(KnowledgeIndexJob.id == job_id)
-                .with_for_update()
+                select(KnowledgeIndexJob).where(KnowledgeIndexJob.id == job_id).with_for_update()
             )
             if job is None:
                 return False
@@ -698,9 +696,7 @@ class DocumentIndexer:
                 "VECTOR_CLEANUP_FAILED", "向量清理暂时失败，可安全重试", job.attempt
             )
 
-    def _chunk_model(
-        self, document: KnowledgeDocument, draft: ChunkDraft
-    ) -> KnowledgeChunk:
+    def _chunk_model(self, document: KnowledgeDocument, draft: ChunkDraft) -> KnowledgeChunk:
         return KnowledgeChunk(
             id=draft.id,
             document_id=document.id,
@@ -715,12 +711,25 @@ class DocumentIndexer:
             content_hash=draft.content_hash,
             char_count=len(draft.content),
             embedding_model=self._embedding.model,
+            heading_path=list(draft.heading_path),
+            anchor=draft.anchor,
+            block_kind=draft.block_kind,
+            source_locator=draft.source_locator,
+        )
+
+    def _parser_limits(self) -> ParserLimits:
+        return ParserLimits(
+            max_file_size=self._settings.knowledge_max_file_size,
+            max_pages=self._settings.knowledge_max_pages,
+            max_blocks=self._settings.knowledge_max_blocks,
+            max_uncompressed_size=self._settings.knowledge_max_uncompressed_size,
+            max_compression_ratio=self._settings.knowledge_max_compression_ratio,
+            minimum_text_characters=self._settings.knowledge_min_text_characters,
+            minimum_text_per_page=self._settings.knowledge_min_text_per_page,
         )
 
     @staticmethod
-    async def _latest_job(
-        session: AsyncSession, document_id: UUID
-    ) -> KnowledgeIndexJob | None:
+    async def _latest_job(session: AsyncSession, document_id: UUID) -> KnowledgeIndexJob | None:
         return cast(
             KnowledgeIndexJob | None,
             await session.scalar(

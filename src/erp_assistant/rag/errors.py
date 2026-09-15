@@ -5,7 +5,11 @@ class RagError(Exception):
         self.message = message
 
 
-class PdfValidationError(RagError):
+class DocumentValidationError(RagError):
+    pass
+
+
+class PdfValidationError(DocumentValidationError):
     pass
 
 

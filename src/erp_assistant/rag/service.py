@@ -41,7 +41,7 @@ async def create_document(
     dispatch: DocumentDispatcher,
     *,
     content: bytes,
-    page_count: int,
+    page_count: int | None,
     tenant_id: str,
     operator_id: str,
     scope: KnowledgeScope,
@@ -76,9 +76,15 @@ async def create_document(
     )
     version = int(latest_version or 0) + 1
     document_id = uuid4()
+    extension = {
+        "application/pdf": ".pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+        "text/markdown": ".md",
+        "text/html": ".html",
+    }[media_type]
     object_key = (
         f"knowledge/{scope.value.lower()}/{owner}/{document_key}/"
-        f"v{version}/{document_id}/original.pdf"
+        f"v{version}/{document_id}/original{extension}"
     )
     document = KnowledgeDocument(
         id=document_id,
@@ -122,7 +128,7 @@ async def create_document(
     await session.commit()
 
     try:
-        await asyncio.to_thread(storage.put_bytes, object_key, content, "application/pdf")
+        await asyncio.to_thread(storage.put_bytes, object_key, content, media_type)
         document.status = DocumentStatus.QUEUED.value
         await session.commit()
         job.celery_task_id = dispatch(document_id)
