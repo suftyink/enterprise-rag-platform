@@ -12,6 +12,7 @@ from erp_assistant.orchestration.provider_factory import (
 from erp_assistant.orchestration.providers import EmbeddingProvider, RerankProvider
 from erp_assistant.rag.profile_bound_retriever import ProfileBoundRetriever
 from erp_assistant.rag.retriever import KnowledgeRetriever
+from erp_assistant.rag.runtime_composition import get_retrieval_runtime_registry
 from erp_assistant.rag.vector_store import VectorStore, get_vector_store
 
 
@@ -29,4 +30,13 @@ def get_knowledge_retriever(
         reranker=reranker,
         settings=settings,
     )
-    return ProfileBoundRetriever(session, retriever, settings)
+    return ProfileBoundRetriever(
+        session,
+        retriever,
+        settings,
+        runtime_registry=(
+            get_retrieval_runtime_registry()
+            if settings.retrieval_runtime_deployments
+            else None
+        ),
+    )

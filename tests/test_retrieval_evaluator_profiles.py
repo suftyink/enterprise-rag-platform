@@ -43,6 +43,10 @@ from erp_assistant.rag.retriever import (
     RetrievalOutcome,
     retrieval_configuration_fingerprint,
 )
+from erp_assistant.rag.runtime_registry import (
+    RetrievalRuntimeBinding,
+    RetrievalRuntimeRegistry,
+)
 from erp_assistant.rag.types import DataClassification, SearchDecision
 from erp_assistant.rag.vector_store import VectorHit
 from tests.retrieval_evaluation_support import (
@@ -993,3 +997,147 @@ async def test_run_blocks_profile_when_configured_latency_gate_is_missed(
 
     assert "LATENCY_P95_ABOVE_THRESHOLD" in report.gate.reasons
     assert report.activation is None
+
+
+@pytest.mark.asyncio
+async def test_run_follows_atomic_active_binding_switch_and_rollback(
+    tmp_path: Path,
+    retrieval_session: AsyncSession,
+) -> None:
+    first_chunk = await retrieval_session.scalar(select(KnowledgeChunk))
+    assert first_chunk is not None
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/embeddings":
+            return httpx.Response(
+                200,
+                json={"data": [{"index": 0, "embedding": [0.2, 0.3, 0.5]}]},
+            )
+        return httpx.Response(
+            200,
+            json={"results": [{"index": 0, "relevance_score": 0.97}]},
+        )
+
+    async with httpx.AsyncClient(
+        base_url="https://approved-cloud.example",
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        settings = Settings(rag_enabled=True, app_env="production")
+
+        def binding(
+            *,
+            rerank_version: str,
+            rerank_deployment: str,
+            vector_store: OneHitVectorStore,
+        ) -> RetrievalRuntimeBinding:
+            return RetrievalRuntimeBinding(
+                data_classification=DataClassification.ORDINARY,
+                vector_store=vector_store,
+                embedding=HttpEmbeddingProvider(
+                    client,
+                    deployment="cloud-embedding-prod",
+                    model="semantic-embed",
+                    version="v1",
+                    dimension=3,
+                    boundary=ProviderBoundary.CLOUD,
+                ),
+                reranker=HttpRerankProvider(
+                    client,
+                    deployment=rerank_deployment,
+                    model="semantic-rerank",
+                    version=rerank_version,
+                    boundary=ProviderBoundary.CLOUD,
+                ),
+                settings=settings,
+            )
+
+        first_store = OneHitVectorStore(first_chunk.id)
+        first_store.identity = "staging-index-v1"
+        second_store = OneHitVectorStore(first_chunk.id)
+        second_store.identity = "staging-index-v2"
+        first_binding = binding(
+            rerank_version="v1",
+            rerank_deployment="cloud-rerank-prod",
+            vector_store=first_store,
+        )
+        second_binding = binding(
+            rerank_version="v2",
+            rerank_deployment="cloud-rerank-next",
+            vector_store=second_store,
+        )
+        registry = RetrievalRuntimeRegistry([first_binding, second_binding])
+
+        def profile(
+            binding_value: RetrievalRuntimeBinding,
+            *,
+            version: int,
+            status: str,
+        ) -> RetrievalProfileRecord:
+            return RetrievalProfileRecord(
+                profile_key="ordinary-pilot",
+                version=version,
+                data_classification=DataClassification.ORDINARY.value,
+                provider_boundary=ProviderBoundary.CLOUD.value,
+                embedding_deployment=binding_value.embedding.deployment,
+                embedding_model=binding_value.embedding.model,
+                embedding_dimension=binding_value.embedding.dimension,
+                rerank_deployment=binding_value.reranker.deployment,
+                rerank_model=binding_value.reranker.model,
+                index_identity=binding_value.vector_store.identity,
+                parser_version="parser-v1",
+                chunk_version="chunk-v1",
+                retrieval_config=binding_value.retrieval_config,
+                configuration_fingerprint=binding_value.configuration_fingerprint,
+                production_ready=True,
+                status=status,
+            )
+
+        first_profile = profile(first_binding, version=1, status="ACTIVE")
+        second_profile = profile(second_binding, version=2, status="STAGING")
+        retrieval_session.add_all([first_profile, second_profile])
+        await retrieval_session.commit()
+        fallback = first_binding.build(retrieval_session)
+        retriever = ProfileBoundRetriever(
+            retrieval_session,
+            fallback,
+            settings,
+            runtime_registry=registry,
+        )
+        dataset = write_dataset(
+            tmp_path / "runtime-switch.jsonl",
+            [
+                evaluation_case(
+                    "runtime-switch-1",
+                    "priority shipment SKU-X1",
+                    expected_sources=[
+                        {"documentKey": "semantic-sop", "pageStart": 1, "pageEnd": 1}
+                    ],
+                    expected_decision="MATCHED",
+                    categories=["SKU_PRODUCT_IDENTIFIER"],
+                )
+            ],
+        )
+
+        first_report = await RetrievalEvaluator(retriever, environment()).run(dataset)
+        first_profile.status = "ROLLBACK"
+        await retrieval_session.flush()
+        second_profile.status = "ACTIVE"
+        second_profile.previous_profile_id = first_profile.id
+        await retrieval_session.commit()
+        second_report = await RetrievalEvaluator(retriever, environment()).run(dataset)
+        second_profile.status = "ROLLBACK"
+        await retrieval_session.flush()
+        first_profile.status = "ACTIVE"
+        first_profile.previous_profile_id = second_profile.id
+        await retrieval_session.commit()
+        rollback_report = await RetrievalEvaluator(retriever, environment()).run(dataset)
+
+    assert first_report.metadata.routes[0].rerank_deployment == "cloud-rerank-prod"
+    assert second_report.metadata.routes[0].rerank_deployment == "cloud-rerank-next"
+    assert rollback_report.metadata.routes[0].rerank_deployment == "cloud-rerank-prod"
+    assert first_report.metadata.routes[0].retrieval_config["vectorIndex"] == "staging-index-v1"
+    assert second_report.metadata.routes[0].retrieval_config["vectorIndex"] == "staging-index-v2"
+    assert rollback_report.metadata.routes[0].retrieval_config["vectorIndex"] == "staging-index-v1"
+    assert first_report.metrics.recall_at_5 == 1.0
+    assert second_report.metrics.recall_at_5 == 1.0
+    assert rollback_report.metrics.recall_at_5 == 1.0

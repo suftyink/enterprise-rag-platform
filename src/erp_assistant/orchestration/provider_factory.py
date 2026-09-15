@@ -28,6 +28,10 @@ def _http_client(base_url: str, timeout: float) -> httpx.AsyncClient:
     return client
 
 
+def create_retrieval_http_client(base_url: str, timeout: float) -> httpx.AsyncClient:
+    return _http_client(base_url, timeout)
+
+
 async def close_retrieval_provider_clients() -> None:
     clients = list(_http_clients)
     _http_clients.clear()
@@ -37,6 +41,9 @@ async def close_retrieval_provider_clients() -> None:
     get_embedding_provider_for.cache_clear()
     get_rerank_provider.cache_clear()
     get_rerank_provider_for.cache_clear()
+    from erp_assistant.rag.runtime_composition import get_retrieval_runtime_registry
+
+    get_retrieval_runtime_registry.cache_clear()
 
 
 @lru_cache

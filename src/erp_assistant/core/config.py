@@ -1,6 +1,44 @@
 from functools import lru_cache
+from typing import Annotated, Literal
 
+from pydantic import BaseModel, Field, SecretStr, StringConstraints
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+
+
+class EmbeddingDeploymentSettings(BaseModel):
+    base_url: NonEmptyStr
+    api_key: SecretStr = SecretStr("")
+    deployment: NonEmptyStr
+    model: NonEmptyStr
+    version: NonEmptyStr
+    dimension: int = Field(gt=0)
+
+
+class RerankDeploymentSettings(BaseModel):
+    base_url: NonEmptyStr
+    api_key: SecretStr = SecretStr("")
+    deployment: NonEmptyStr
+    model: NonEmptyStr
+    version: NonEmptyStr
+
+
+class VectorIndexDeploymentSettings(BaseModel):
+    uri: NonEmptyStr
+    collection: NonEmptyStr
+
+
+class RetrievalRuntimeDeploymentSettings(BaseModel):
+    data_classification: Literal["ORDINARY", "RESTRICTED"]
+    provider_boundary: Literal["CLOUD", "INTERNAL"]
+    embedding: EmbeddingDeploymentSettings
+    reranker: RerankDeploymentSettings
+    vector_index: VectorIndexDeploymentSettings
+    rrf_k: int = Field(default=60, gt=0)
+    candidate_multiplier: int = Field(default=4, gt=0)
+    max_candidates: int = Field(default=80, ge=20)
+    rerank_threshold: float = Field(default=0.10, ge=0, le=1)
 
 
 class Settings(BaseSettings):
@@ -39,6 +77,9 @@ class Settings(BaseSettings):
     restricted_rerank_model: str = ""
     restricted_rerank_version: str = ""
     retrieval_provider_timeout_seconds: float = 10.0
+    retrieval_runtime_deployments: list[RetrievalRuntimeDeploymentSettings] = Field(
+        default_factory=list
+    )
     restricted_knowledge_document_keys: str = ""
     ordinary_knowledge_sha256: str = ""
     restricted_knowledge_sha256: str = ""

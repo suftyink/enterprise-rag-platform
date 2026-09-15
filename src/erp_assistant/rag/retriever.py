@@ -37,6 +37,37 @@ def retrieval_configuration_fingerprint(
     return sha256(payload).hexdigest()
 
 
+def retrieval_configuration(
+    *,
+    settings: Settings,
+    vector_store: VectorStore,
+    embedding: EmbeddingProvider,
+    reranker: RerankProvider,
+) -> dict[str, int | float | bool | str]:
+    embedding_boundary = ProviderBoundary(
+        getattr(embedding, "boundary", ProviderBoundary.INTERNAL)
+    )
+    rerank_boundary = ProviderBoundary(getattr(reranker, "boundary", embedding_boundary))
+    if embedding_boundary is not rerank_boundary:
+        raise RagDependencyError(
+            "PROFILE_BOUNDARY_MISMATCH", "Embedding 与 Rerank 不属于同一安全边界"
+        )
+    return {
+        "candidateMultiplier": settings.rag_candidate_multiplier,
+        "embeddingDimension": embedding.dimension,
+        "embeddingDeployment": str(getattr(embedding, "deployment", "legacy")),
+        "embeddingModel": embedding.model,
+        "maxCandidates": settings.rag_max_candidates,
+        "rerankModel": reranker.model,
+        "rerankDeployment": str(getattr(reranker, "deployment", "legacy")),
+        "rerankThreshold": settings.rag_rerank_threshold,
+        "retrieval": "dense-bm25-rrf-v1",
+        "rrfK": settings.rag_rrf_k,
+        "vectorIndex": str(getattr(vector_store, "identity", settings.milvus_collection)),
+        "providerBoundary": embedding_boundary.value,
+    }
+
+
 @dataclass(frozen=True)
 class ActorContext:
     subject_id: str
@@ -308,20 +339,12 @@ class KnowledgeRetriever:
         return retrieval_configuration_fingerprint(self.retrieval_config())
 
     def retrieval_config(self) -> dict[str, int | float | bool | str]:
-        return {
-            "candidateMultiplier": self._settings.rag_candidate_multiplier,
-            "embeddingDimension": self._embedding.dimension,
-            "embeddingDeployment": str(getattr(self._embedding, "deployment", "legacy")),
-            "embeddingModel": self._embedding.model,
-            "maxCandidates": self._settings.rag_max_candidates,
-            "rerankModel": self._reranker.model,
-            "rerankDeployment": str(getattr(self._reranker, "deployment", "legacy")),
-            "rerankThreshold": self._settings.rag_rerank_threshold,
-            "retrieval": "dense-bm25-rrf-v1",
-            "rrfK": self._settings.rag_rrf_k,
-            "vectorIndex": self.index_identity,
-            "providerBoundary": self._provider_boundary().value,
-        }
+        return retrieval_configuration(
+            settings=self._settings,
+            vector_store=self._vector_store,
+            embedding=self._embedding,
+            reranker=self._reranker,
+        )
 
     def _provider_boundary(self) -> ProviderBoundary:
         embedding = ProviderBoundary(
