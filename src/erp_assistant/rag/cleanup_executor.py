@@ -94,7 +94,12 @@ class KnowledgeCleanupExecutor:
                         select(KnowledgeCleanupRequest)
                         .where(
                             KnowledgeCleanupRequest.document_id == document_id,
-                            KnowledgeCleanupRequest.status == CleanupStatus.PENDING.value,
+                            KnowledgeCleanupRequest.status.in_(
+                                [
+                                    CleanupStatus.PENDING.value,
+                                    CleanupStatus.FAILED.value,
+                                ]
+                            ),
                         )
                         .order_by(
                             KnowledgeCleanupRequest.created_at,
@@ -108,6 +113,7 @@ class KnowledgeCleanupExecutor:
                     return None
                 request.status = CleanupStatus.RUNNING.value
                 request.attempt += 1
+                request.error_detail = None
             return request
 
     async def _complete(

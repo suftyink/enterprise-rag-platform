@@ -13,7 +13,11 @@ from erp_assistant.models.knowledge import (
     KnowledgeCorpusHead,
     KnowledgeDocument,
 )
-from erp_assistant.rag.cleanup_executor import CleanupDecision, KnowledgeCleanupExecutor
+from erp_assistant.rag.cleanup_executor import (
+    CleanupDecision,
+    CleanupRetryableError,
+    KnowledgeCleanupExecutor,
+)
 from erp_assistant.rag.document_indexer import DocumentIndexOutcome
 from erp_assistant.rag.knowledge_corpus import SYSTEM_CORPUS_ACTOR, KnowledgeCorpus
 from erp_assistant.rag.types import CleanupStatus, DocumentStatus, RetentionStatus
@@ -58,6 +62,17 @@ class RecordingVectors:
 
     def delete_document(self, document_id: UUID) -> None:
         self.deleted.append(document_id)
+
+
+@dataclass
+class FlakyVectors(RecordingVectors):
+    failures_remaining: int = 1
+
+    def delete_document(self, document_id: UUID) -> None:
+        if self.failures_remaining:
+            self.failures_remaining -= 1
+            raise RuntimeError("temporary vector failure")
+        super().delete_document(document_id)
 
 
 @pytest_asyncio.fixture
@@ -153,3 +168,75 @@ async def test_cleanup_executor_deletes_artifacts_and_completes_through_corpus(
     assert view.cleanup_requests[-1].attempt == 1
     assert view.audit_events[-1].action == "COMPLETE_CLEANUP"
     assert (await executor.execute(document_id)).decision is CleanupDecision.SKIPPED
+
+
+@pytest.mark.asyncio
+async def test_cleanup_executor_reclaims_failed_request_on_retry(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    document_id = uuid4()
+    vector_id = uuid4()
+    document = KnowledgeDocument(
+        id=document_id,
+        scope="TENANT",
+        scope_id="tenant-a",
+        tenant_id="tenant-a",
+        document_key="inventory-sop",
+        version=1,
+        title="Inventory SOP",
+        original_filename="inventory.pdf",
+        media_type="application/pdf",
+        size_bytes=100,
+        sha256="a" * 64,
+        object_key="knowledge/inventory/original.pdf",
+        vector_document_id=vector_id,
+        status=DocumentStatus.READY.value,
+        active=False,
+        publication_status="WITHDRAWN",
+        retention_status=RetentionStatus.RETAINED.value,
+        index_artifacts_present=True,
+        created_by="author-a",
+    )
+    cleanup = KnowledgeCleanupRequest(
+        document_id=document_id,
+        idempotency_key=f"{document_id}:VECTOR:1",
+        kind="VECTOR",
+        status=CleanupStatus.PENDING.value,
+        artifacts=[{"kind": "vector_document", "document_id": str(vector_id)}],
+    )
+    async with session_factory() as session:
+        session.add_all(
+            [
+                document,
+                KnowledgeCorpusHead(
+                    scope=document.scope,
+                    scope_id=document.scope_id,
+                    document_key=document.document_key,
+                    revision=1,
+                ),
+                cleanup,
+            ]
+        )
+        await session.commit()
+    corpus = KnowledgeCorpus(session_factory=session_factory, processor=UnusedProcessor())
+    vectors = FlakyVectors()
+    executor = KnowledgeCleanupExecutor(
+        session_factory=session_factory,
+        storage=RecordingStorage(),
+        vectors=vectors,  # type: ignore[arg-type]
+        corpus=corpus,
+    )
+
+    with pytest.raises(CleanupRetryableError):
+        await executor.execute(document_id)
+    failed = await corpus.inspect(document_id, SYSTEM_CORPUS_ACTOR)
+    assert failed.cleanup_requests[-1].status is CleanupStatus.FAILED
+    assert failed.cleanup_requests[-1].attempt == 1
+
+    outcome = await executor.execute(document_id)
+
+    assert outcome.decision is CleanupDecision.COMPLETED
+    assert vectors.deleted == [vector_id]
+    completed = await corpus.inspect(document_id, SYSTEM_CORPUS_ACTOR)
+    assert completed.cleanup_requests[-1].status is CleanupStatus.COMPLETED
+    assert completed.cleanup_requests[-1].attempt == 2
