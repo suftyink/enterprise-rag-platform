@@ -364,7 +364,7 @@ async def test_index_html_removes_active_noise_and_preserves_anchor_context(
 ) -> None:
     storage = MemoryStorage()
     vectors = MemoryVectorWriter()
-    content = b"""<!doctype html><html><body>
+    content = b"""<!doctype html><html><head><title>Ignored title</title><body>
       <nav>Secret navigation noise</nav>
       <h1 id="fees">Marketplace Fees</h1>
       <p>Use <a href="/fee-table">the fee table</a> for SKU-A1 at 7.25 USD.</p>
@@ -408,6 +408,7 @@ async def test_index_html_removes_active_noise_and_preserves_anchor_context(
     assert "Secret navigation noise" not in combined
     assert "Invisible dangerous guidance" not in combined
     assert "do not index" not in combined
+    assert "Ignored title" not in combined
     fee_chunk = next(chunk for chunk in chunks if "SKU-A1" in chunk.content)
     assert fee_chunk.heading_path == ["Marketplace Fees"]
     assert fee_chunk.anchor == "fees"
@@ -499,6 +500,71 @@ async def test_index_distinguishes_malformed_html_from_empty_html(
 
     assert malformed_outcome.error_code == "INVALID_HTML"
     assert empty_outcome.error_code == "EMPTY_DOCUMENT"
+
+
+@pytest.mark.asyncio
+async def test_index_accepts_html5_optional_end_tags(
+    indexer_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    storage = MemoryStorage()
+    content = b"""<!doctype html><html><body>
+      <ul><li>Keep SKU-OPTIONAL-1 visible<li>Retain 12.5 kg units</ul>
+      <p>First policy paragraph has enough text
+      <p>Second policy paragraph remains searchable
+    </body></html>"""
+    document = await _add_document(
+        indexer_factory,
+        storage,
+        version=1,
+        content=content,
+        status=DocumentStatus.QUEUED,
+        active=False,
+        media_type="text/html",
+        filename="optional-end-tags.html",
+    )
+
+    outcome = await _indexer(indexer_factory, storage, MemoryVectorWriter()).index(document.id)
+
+    assert outcome.decision is IndexDecision.INDEXED_FOR_CURRENT_POLICY
+
+
+@pytest.mark.asyncio
+async def test_index_limits_ordinary_html_id_to_its_element_scope(
+    indexer_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    storage = MemoryStorage()
+    content = b"""<!doctype html><html><body>
+      <div id="first">First anchored policy text for SKU-FIRST.</div>
+      <div>Unrelated sibling policy text for SKU-SECOND.</div>
+    </body></html>"""
+    document = await _add_document(
+        indexer_factory,
+        storage,
+        version=1,
+        content=content,
+        status=DocumentStatus.QUEUED,
+        active=False,
+        media_type="text/html",
+        filename="anchor-scope.html",
+    )
+
+    outcome = await _indexer(indexer_factory, storage, MemoryVectorWriter()).index(document.id)
+
+    async with indexer_factory() as session:
+        chunks = list(
+            (
+                await session.scalars(
+                    select(KnowledgeChunk)
+                    .where(KnowledgeChunk.document_id == document.id)
+                    .order_by(KnowledgeChunk.chunk_index)
+                )
+            ).all()
+        )
+    assert outcome.decision is IndexDecision.INDEXED_FOR_CURRENT_POLICY
+    first = next(chunk for chunk in chunks if "SKU-FIRST" in chunk.content)
+    second = next(chunk for chunk in chunks if "SKU-SECOND" in chunk.content)
+    assert first.anchor == "first"
+    assert second.anchor is None
 
 
 @pytest.mark.asyncio

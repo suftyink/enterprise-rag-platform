@@ -52,6 +52,56 @@ _CONTAINER_TAGS = {
     "main",
     "section",
 }
+_OPTIONAL_END_TAGS = {
+    "body",
+    "colgroup",
+    "dd",
+    "dt",
+    "head",
+    "html",
+    "li",
+    "optgroup",
+    "option",
+    "p",
+    "rp",
+    "rt",
+    "tbody",
+    "td",
+    "tfoot",
+    "th",
+    "thead",
+    "tr",
+}
+_P_CLOSE_START_TAGS = _CONTAINER_TAGS | {
+    "address",
+    "details",
+    "dialog",
+    "fieldset",
+    "form",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "hr",
+    "menu",
+    "ol",
+    "p",
+    "pre",
+    "table",
+    "ul",
+}
+_AUTO_CLOSE_ON_START = {
+    "dd": {"dd", "dt"},
+    "dt": {"dd", "dt"},
+    "li": {"li"},
+    "option": {"option"},
+    "td": {"td", "th"},
+    "th": {"td", "th"},
+    "tr": {"tr"},
+}
+_PERSISTENT_ANCHOR_TAGS = {"a", *(f"h{level}" for level in range(1, 7))}
 
 
 class _StructuredHtmlParser(HTMLParser):
@@ -64,7 +114,9 @@ class _StructuredHtmlParser(HTMLParser):
         self._heading_anchor: str | None = None
         self._current_anchor: str | None = None
         self._skip_depth = 0
+        self._skip_root: str | None = None
         self._open_tags: list[str] = []
+        self._anchor_restore: list[tuple[bool, str | None]] = []
         self._malformed = False
         self._active_tag: str | None = None
         self._active_kind: BlockKind | None = None
@@ -77,19 +129,25 @@ class _StructuredHtmlParser(HTMLParser):
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attributes = {name.lower(): value for name, value in attrs}
         if self._skip_depth:
-            if tag not in _VOID_TAGS:
-                self._skip_depth += 1
-            return
+            if self._skip_root == "head" and self._skip_depth == 1 and tag == "body":
+                self._skip_depth = 0
+                self._skip_root = None
+            else:
+                if tag not in _VOID_TAGS:
+                    self._skip_depth += 1
+                return
         if tag in _ACTIVE_TAGS | _IGNORED_TAGS:
             self._finish_implicit_block()
             if tag not in _VOID_TAGS:
                 self._skip_depth = 1
+                self._skip_root = tag
             if tag in _ACTIVE_TAGS:
                 self.warnings.append("HTML_ACTIVE_CONTENT_REMOVED")
             return
         if tag in _NAVIGATION_TAGS:
             self._finish_implicit_block()
             self._skip_depth = 1
+            self._skip_root = tag
             self.warnings.append("HTML_NAVIGATION_REMOVED")
             return
         style = (attributes.get("style") or "").replace(" ", "").lower()
@@ -103,11 +161,15 @@ class _StructuredHtmlParser(HTMLParser):
             self._finish_implicit_block()
             if tag not in _VOID_TAGS:
                 self._skip_depth = 1
+                self._skip_root = tag
             self.warnings.append("HTML_HIDDEN_CONTENT_REMOVED")
             return
-        if tag not in _VOID_TAGS:
-            self._open_tags.append(tag)
         anchor = attributes.get("id") or attributes.get("name")
+        self._implicitly_close_for_start(tag)
+        if tag not in _VOID_TAGS:
+            should_restore = bool(anchor and tag not in _PERSISTENT_ANCHOR_TAGS)
+            self._open_tags.append(tag)
+            self._anchor_restore.append((should_restore, self._current_anchor))
         if anchor:
             if self._active_tag is None:
                 self._finish_implicit_block()
@@ -134,17 +196,19 @@ class _StructuredHtmlParser(HTMLParser):
     def handle_endtag(self, tag: str) -> None:
         if self._skip_depth:
             self._skip_depth -= 1
+            if not self._skip_depth:
+                self._skip_root = None
             return
         if tag in _VOID_TAGS:
             return
+        while self._open_tags and self._open_tags[-1] != tag:
+            if self._open_tags[-1] not in _OPTIONAL_END_TAGS:
+                break
+            self._pop_open_tag()
         if not self._open_tags or self._open_tags[-1] != tag:
             self._malformed = True
             return
-        if tag == self._active_tag:
-            self._finish_block()
-        elif tag in _CONTAINER_TAGS:
-            self._finish_implicit_block()
-        self._open_tags.pop()
+        self._pop_open_tag()
 
     def handle_data(self, data: str) -> None:
         if self._skip_depth:
@@ -160,8 +224,32 @@ class _StructuredHtmlParser(HTMLParser):
         super().close()
         self._finish_block()
         self._finish_implicit_block()
+        if self._skip_root == "head" and self._skip_depth == 1:
+            self._skip_depth = 0
+            self._skip_root = None
+        while self._open_tags and self._open_tags[-1] in _OPTIONAL_END_TAGS:
+            self._pop_open_tag()
         if self._malformed or self._skip_depth or self._open_tags:
             raise DocumentValidationError("INVALID_HTML", "HTML 文档损坏或格式无效")
+
+    def _implicitly_close_for_start(self, tag: str) -> None:
+        auto_close = _AUTO_CLOSE_ON_START.get(tag, set())
+        while self._open_tags:
+            current = self._open_tags[-1]
+            if current in auto_close or (current == "p" and tag in _P_CLOSE_START_TAGS):
+                self._pop_open_tag()
+                continue
+            break
+
+    def _pop_open_tag(self) -> None:
+        tag = self._open_tags.pop()
+        should_restore, previous_anchor = self._anchor_restore.pop()
+        if tag == self._active_tag:
+            self._finish_block()
+        elif tag in _CONTAINER_TAGS:
+            self._finish_implicit_block()
+        if should_restore:
+            self._current_anchor = previous_anchor
 
     def _finish_block(self) -> None:
         if self._active_kind is None:
