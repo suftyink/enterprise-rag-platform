@@ -109,8 +109,12 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 .document-card { padding: 18px; box-shadow: none; border-left: 4px solid var(--teal); }
 .document-card header { display: flex; justify-content: space-between; gap: 16px; }
 .document-card h2 { margin: 0 0 5px; font-size: 18px; color: var(--navy); overflow-wrap: anywhere; }
-.document-meta, .document-warnings { margin: 12px 0; color: var(--muted); font: 12px/1.6 "Cascadia Mono", monospace; overflow-wrap: anywhere; }
+.document-meta, .document-warnings, .document-error { margin: 12px 0; color: var(--muted); font: 12px/1.6 "Cascadia Mono", monospace; overflow-wrap: anywhere; }
 .document-warnings { padding: 10px; color: #713900; background: #fff4e4; }
+.document-error { padding: 10px; color: #7b1d1d; background: #fff0f0; }
+.document-progress { display: grid; grid-template-columns: repeat(3, max-content minmax(0, 1fr)); gap: 6px 10px; margin: 14px 0; padding: 12px; background: #eef2f1; font-size: 12px; }
+.document-progress dt { font-weight: 700; color: var(--navy); }
+.document-progress dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
 .document-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 
 .evidence-card { padding: 18px; margin-bottom: 20px; box-shadow: none; }
@@ -146,6 +150,7 @@ dialog::backdrop { background: rgb(11 34 57 / 58%); }
   .upload-card, .pilot-form { grid-template-columns: 1fr; }
   .upload-card > *, .pilot-form > * { grid-column: 1 !important; }
   .primary-button { width: 100%; }
+  .document-progress { grid-template-columns: max-content minmax(0, 1fr); }
 }
 
 @media (prefers-reduced-motion: reduce) {

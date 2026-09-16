@@ -10,6 +10,8 @@ import {
   statusParagraph,
 } from "./core.js";
 
+let documentRefreshTimer = null;
+
 export function bindGovernanceWorkflows() {
   byId("upload-form").addEventListener("submit", uploadDocument);
   byId("refresh-documents").addEventListener("click", loadDocuments);
@@ -102,6 +104,7 @@ export async function loadDocuments() {
       return;
     }
     documents.forEach((item) => list.append(documentCard(item)));
+    scheduleProgressRefresh(documents);
   } catch (error) {
     list.replaceChildren(statusParagraph(`知识清单读取失败：${error.message}`));
   }
@@ -132,11 +135,34 @@ function documentCard(item) {
     `parser ${item.parserVersion || "等待中"}`,
   ].join(" · ");
   article.append(header, meta);
+  const progress = document.createElement("dl");
+  progress.className = "document-progress";
+  [
+    ["处理阶段", item.phase || item.status],
+    ["任务结果", item.jobStatus || "尚未创建任务"],
+    ["处理尝试", item.attempt === null ? "—" : String(item.attempt)],
+    ["分块数量", item.chunkCount === null ? "—" : String(item.chunkCount)],
+    ["检索资格", item.retrievalEligible ? "可检索" : "不可检索"],
+    ["切分版本", item.chunkingVersion || "等待中"],
+  ].forEach(([label, value]) => {
+    const term = document.createElement("dt");
+    term.textContent = label;
+    const description = document.createElement("dd");
+    description.textContent = value;
+    progress.append(term, description);
+  });
+  article.append(progress);
   if (item.warnings.length) {
     const warnings = document.createElement("p");
     warnings.className = "document-warnings";
     warnings.textContent = `解析警告：${item.warnings.join("；")}`;
     article.append(warnings);
+  }
+  if (item.errorCode || item.errorDetail) {
+    const failure = document.createElement("p");
+    failure.className = "document-error";
+    failure.textContent = `处理失败：${item.errorCode || "UNKNOWN"} · ${item.errorDetail || "请重试或联系管理员"}`;
+    article.append(failure);
   }
   const actions = document.createElement("div");
   actions.className = "document-actions";
@@ -181,11 +207,25 @@ async function completeLifecycleConfirmation() {
         expectedRevision: pending.document.governanceRevision,
       }),
     });
-    showGlobal(`治理操作已完成并写入审计。trace ${result.traceId}`, "success");
+    const names = { PUBLISH: "发布", WITHDRAW: "撤回", ROLLBACK: "回滚" };
+    showGlobal(
+      `${names[pending.action]}操作已完成并写入审计。trace ${result.traceId}`,
+      "success",
+    );
     await loadDocuments();
   } catch (error) {
     showGlobal(`治理操作失败：${error.message}`, "error");
   }
+}
+
+function scheduleProgressRefresh(documents) {
+  if (documentRefreshTimer !== null) window.clearTimeout(documentRefreshTimer);
+  const processing = documents.some((item) =>
+    ["QUEUED", "PROCESSING", "PARSING", "INDEXING"].includes(item.jobStatus)
+  );
+  documentRefreshTimer = processing
+    ? window.setTimeout(() => loadDocuments(), 2000)
+    : null;
 }
 
 export async function loadPilotStatus() {

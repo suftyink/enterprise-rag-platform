@@ -44,7 +44,7 @@ from erp_assistant.rag.types import (
     PublicationStatus,
     RetentionStatus,
 )
-from erp_assistant.web.pilot import PilotAccessGate
+from erp_assistant.web.pilot import PilotAccessDecision, PilotAccessGate
 from erp_assistant.web.routes import get_web_knowledge_corpus
 from erp_assistant.web.sessions import (
     OidcTransaction,
@@ -450,13 +450,23 @@ def test_admin_upload_governance_confirmation_and_pilot_controls(
     card = page.locator(".document-card", has_text="试点操作指南")
     assert card.is_visible()
     assert card.get_by_text("UNPUBLISHED").is_visible()
+    assert card.get_by_text("处理阶段").is_visible()
+    assert card.get_by_text("任务结果").is_visible()
+    assert card.get_by_text("QUEUED", exact=True).first.is_visible()
+    assert card.get_by_text("分块数量").is_visible()
     assert internal_web_server.storage.objects
 
-    card.get_by_role("button", name="发布").click()
-    page.get_by_label("操作原因").fill("完成管理员验收")
-    page.get_by_role("button", name="确认执行").click()
-    page.get_by_text("治理操作已完成并写入审计").wait_for()
-    assert internal_web_server.corpus.transitions[0][1] is LifecycleAction.PUBLISH
+    for label, action in (
+        ("发布", LifecycleAction.PUBLISH),
+        ("撤回", LifecycleAction.WITHDRAW),
+        ("回滚", LifecycleAction.ROLLBACK),
+    ):
+        card = page.locator(".document-card", has_text="试点操作指南")
+        card.get_by_role("button", name=label, exact=True).click()
+        page.get_by_label("操作原因").fill(f"完成{label}验收")
+        page.get_by_role("button", name="确认执行").click()
+        page.get_by_text(f"{label}操作已完成并写入审计").wait_for()
+        assert internal_web_server.corpus.transitions[-1][1] is action
 
     page.get_by_role("button", name="试点门禁").click()
     page.get_by_label("试点范围").fill("华东运营组 30 人")
@@ -515,13 +525,15 @@ async def test_pilot_gate_fails_closed_until_current_matching_report_is_approved
         assert disabled.reason_code == "PILOT_DISABLED"
 
         enabled = await gate.record(
-            enabled=True,
-            approved_by="system-admin",
-            pilot_scope="华东运营组",
-            capacity="10 RPS",
-            monitoring_owner="ops-owner",
-            rollback_owner="release-owner",
-            reason="证据已复核",
+            PilotAccessDecision(
+                enabled=True,
+                approved_by="system-admin",
+                pilot_scope="华东运营组",
+                capacity="10 RPS",
+                monitoring_owner="ops-owner",
+                rollback_owner="release-owner",
+                reason="证据已复核",
+            )
         )
         assert enabled.enabled is True
         assert enabled.rollback_owner == "release-owner"

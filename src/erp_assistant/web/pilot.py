@@ -42,6 +42,17 @@ class PilotGateState:
         }
 
 
+@dataclass(frozen=True)
+class PilotAccessDecision:
+    enabled: bool
+    approved_by: str
+    pilot_scope: str
+    capacity: str
+    monitoring_owner: str
+    rollback_owner: str
+    reason: str
+
+
 class PilotAccessGate:
     def __init__(self, session: AsyncSession, settings: Settings) -> None:
         self._session = session
@@ -96,19 +107,9 @@ class PilotAccessGate:
             )
         return state
 
-    async def record(
-        self,
-        *,
-        enabled: bool,
-        approved_by: str,
-        pilot_scope: str,
-        capacity: str,
-        monitoring_owner: str,
-        rollback_owner: str,
-        reason: str,
-    ) -> PilotGateState:
+    async def record(self, decision: PilotAccessDecision) -> PilotGateState:
         state = await self.state()
-        if enabled and not state.available:
+        if decision.enabled and not state.available:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail={"code": state.reason_code, "message": "当前发布证据不允许开放试点"},
@@ -118,7 +119,13 @@ class PilotAccessGate:
                 status_code=status.HTTP_409_CONFLICT,
                 detail={"code": "READINESS_REPORT_MISSING", "message": "缺少发布证据"},
             )
-        values = (pilot_scope, capacity, monitoring_owner, rollback_owner, reason)
+        values = (
+            decision.pilot_scope,
+            decision.capacity,
+            decision.monitoring_owner,
+            decision.rollback_owner,
+            decision.reason,
+        )
         if any(not value.strip() for value in values):
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -127,15 +134,15 @@ class PilotAccessGate:
         self._session.add(
             PilotAccessRecord(
                 id=uuid4(),
-                enabled=enabled,
+                enabled=decision.enabled,
                 readiness_report_id=state.report_id,
                 release_fingerprint=state.release_fingerprint,
-                approved_by=approved_by,
-                pilot_scope=pilot_scope.strip(),
-                capacity=capacity.strip(),
-                monitoring_owner=monitoring_owner.strip(),
-                rollback_owner=rollback_owner.strip(),
-                reason=reason.strip(),
+                approved_by=decision.approved_by,
+                pilot_scope=decision.pilot_scope.strip(),
+                capacity=decision.capacity.strip(),
+                monitoring_owner=decision.monitoring_owner.strip(),
+                rollback_owner=decision.rollback_owner.strip(),
+                reason=decision.reason.strip(),
                 created_at=datetime.now(UTC),
             )
         )

@@ -21,7 +21,11 @@ from erp_assistant.api.dependencies import (
     request_trace_id,
 )
 from erp_assistant.api.knowledge_schemas import KnowledgeDocumentResponse
-from erp_assistant.api.routes.knowledge import document_response, upload_document
+from erp_assistant.api.knowledge_upload import (
+    KnowledgeUploadCommand,
+    accept_document_upload,
+)
+from erp_assistant.api.routes.knowledge import document_response
 from erp_assistant.core.config import Settings, get_settings
 from erp_assistant.identity import (
     ActorContext,
@@ -46,7 +50,11 @@ from erp_assistant.rag.knowledge_corpus import KnowledgeCorpus
 from erp_assistant.rag.knowledge_corpus_contracts import CorpusError
 from erp_assistant.rag.knowledge_queries import latest_job
 from erp_assistant.rag.types import KnowledgeScope
-from erp_assistant.web.pilot import PilotAccessGate, get_pilot_access_gate
+from erp_assistant.web.pilot import (
+    PilotAccessDecision,
+    PilotAccessGate,
+    get_pilot_access_gate,
+)
 from erp_assistant.web.schemas import (
     AnswerWebRequest,
     FeedbackWebRequest,
@@ -200,21 +208,20 @@ async def web_upload_document(
     document_key: Annotated[str | None, Form(alias="documentKey", max_length=128)] = None,
     title: Annotated[str | None, Form(max_length=255)] = None,
 ) -> KnowledgeDocumentResponse:
-    return await upload_document(
-        request,
-        response,
-        file,
-        actor,
-        access,
-        session,
-        settings,
-        storage,
-        dispatch,
-        scope,
-        scope_id,
-        document_key,
-        title,
+    result = await accept_document_upload(
+        request=request,
+        file=file,
+        actor=actor,
+        access=access,
+        session=session,
+        settings=settings,
+        storage=storage,
+        dispatch=dispatch,
+        command=KnowledgeUploadCommand(scope, scope_id, document_key, title),
     )
+    if result.duplicate:
+        response.status_code = status.HTTP_200_OK
+    return document_response(result.document, result.job, duplicate=result.duplicate)
 
 
 @router.post("/internal/api/documents/{document_id}/lifecycle")
@@ -269,13 +276,15 @@ async def web_manage_pilot(
     except IdentityDenied as exc:
         raise _error(403, exc.code, "仅系统管理员可管理试点") from exc
     state = await gate.record(
-        enabled=payload.enabled,
-        approved_by=actor.subject_id,
-        pilot_scope=payload.pilot_scope,
-        capacity=payload.capacity,
-        monitoring_owner=payload.monitoring_owner,
-        rollback_owner=payload.rollback_owner,
-        reason=payload.reason,
+        PilotAccessDecision(
+            enabled=payload.enabled,
+            approved_by=actor.subject_id,
+            pilot_scope=payload.pilot_scope,
+            capacity=payload.capacity,
+            monitoring_owner=payload.monitoring_owner,
+            rollback_owner=payload.rollback_owner,
+            reason=payload.reason,
+        )
     )
     return state.to_dict()
 

@@ -1,8 +1,4 @@
 import logging
-import re
-import unicodedata
-from hashlib import sha256
-from pathlib import Path
 from typing import Annotated
 from uuid import UUID
 
@@ -34,6 +30,10 @@ from erp_assistant.api.knowledge_schemas import (
     KnowledgeSearchResponse,
     KnowledgeSearchResult,
 )
+from erp_assistant.api.knowledge_upload import (
+    KnowledgeUploadCommand,
+    accept_document_upload,
+)
 from erp_assistant.core.config import Settings, get_settings
 from erp_assistant.identity import (
     ActorContext,
@@ -44,25 +44,12 @@ from erp_assistant.identity import (
 from erp_assistant.infrastructure.database import get_session
 from erp_assistant.infrastructure.object_storage import ObjectStorage, get_object_storage
 from erp_assistant.models.knowledge import KnowledgeDocument, KnowledgeIndexJob
-from erp_assistant.rag.document_parsers import (
-    validate_media_type,
-)
-from erp_assistant.rag.errors import (
-    DocumentValidationError,
-    PdfValidationError,
-    RagDependencyError,
-    RagError,
-)
+from erp_assistant.rag.errors import RagDependencyError, RagError
 from erp_assistant.rag.knowledge_eligibility import is_retrieval_eligible
 from erp_assistant.rag.knowledge_queries import latest_job
-from erp_assistant.rag.pdf_parser import PypdfParser
 from erp_assistant.rag.profile_bound_retriever import ProfileBoundRetriever
 from erp_assistant.rag.retriever import RetrievalRequest
-from erp_assistant.rag.service import (
-    create_document,
-    retry_document,
-    scope_id_for,
-)
+from erp_assistant.rag.service import retry_document
 from erp_assistant.rag.types import (
     DataClassification,
     DocumentStatus,
@@ -84,45 +71,6 @@ def _error(status_code: int, code: str, message: str) -> HTTPException:
 def _require_rag(settings: Settings) -> None:
     if not settings.rag_enabled:
         raise _error(status.HTTP_503_SERVICE_UNAVAILABLE, "RAG_DISABLED", "RAG 功能未启用")
-
-
-def _document_key(value: str | None, filename: str) -> str:
-    source = value or Path(filename).stem
-    normalized = unicodedata.normalize("NFKC", source).strip().lower()
-    normalized = re.sub(r"[^\w\-.\u3400-\u9fff]+", "-", normalized, flags=re.UNICODE)
-    normalized = normalized.strip("-._")
-    if not normalized:
-        raise _error(status.HTTP_422_UNPROCESSABLE_CONTENT, "INVALID_DOCUMENT_KEY", "文档编号无效")
-    return normalized[:128]
-
-
-async def _read_document(
-    file: UploadFile, settings: Settings
-) -> tuple[bytes, int | None, str, str]:
-    filename = Path(file.filename or "").name
-    content = await file.read(settings.knowledge_max_file_size + 1)
-    if len(content) > settings.knowledge_max_file_size:
-        raise _error(
-            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            "FILE_TOO_LARGE",
-            "文档超过允许的大小限制",
-        )
-    try:
-        declared = validate_media_type(file.content_type or "", content)
-    except DocumentValidationError as exc:
-        status_code = (
-            status.HTTP_415_UNSUPPORTED_MEDIA_TYPE
-            if exc.code == "UNSUPPORTED_MEDIA_TYPE"
-            else status.HTTP_422_UNPROCESSABLE_CONTENT
-        )
-        raise _error(status_code, exc.code, exc.message) from exc
-    page_count: int | None = None
-    if declared == "application/pdf":
-        try:
-            page_count = PypdfParser().inspect(content, settings.knowledge_max_pages)
-        except PdfValidationError as exc:
-            raise _error(status.HTTP_422_UNPROCESSABLE_CONTENT, exc.code, exc.message) from exc
-    return content, page_count, filename, declared
 
 
 def document_response(
@@ -162,28 +110,6 @@ def document_response(
     )
 
 
-def _classify_document(
-    content: bytes,
-    document_key: str,
-    settings: Settings,
-) -> DataClassification:
-    digest = sha256(content).hexdigest()
-    if digest in settings.restricted_document_hashes:
-        return DataClassification.RESTRICTED
-    if digest in settings.ordinary_document_hashes:
-        return DataClassification.ORDINARY
-    if settings.app_env.casefold() == "production":
-        raise RagError(
-            "DOCUMENT_CLASSIFICATION_REQUIRED",
-            "生产文档必须先在服务端受信分类清单中登记",
-        )
-    return (
-        DataClassification.RESTRICTED
-        if document_key.casefold() in settings.restricted_document_keys
-        else DataClassification.ORDINARY
-    )
-
-
 @router.post(
     "/knowledge/documents",
     response_model=KnowledgeDocumentResponse,
@@ -204,42 +130,17 @@ async def upload_document(
     document_key: Annotated[str | None, Form(alias="documentKey", max_length=128)] = None,
     title: Annotated[str | None, Form(max_length=255)] = None,
 ) -> KnowledgeDocumentResponse:
-    _require_rag(settings)
-    try:
-        target_scope_id = scope_id_for(scope, actor.tenant_id, scope_id)
-    except RagError as exc:
-        raise _error(status.HTTP_422_UNPROCESSABLE_CONTENT, exc.code, exc.message) from exc
-    await authorize_or_not_found(
-        access,
-        actor,
-        IdentityAction.PUBLISH_GLOBAL if scope is KnowledgeScope.GLOBAL else IdentityAction.UPLOAD,
-        IdentityResource("knowledge_scope", target_scope_id, scope, target_scope_id),
-        request,
+    result = await accept_document_upload(
+        request=request,
+        file=file,
+        actor=actor,
+        access=access,
+        session=session,
+        settings=settings,
+        storage=storage,
+        dispatch=dispatch,
+        command=KnowledgeUploadCommand(scope, scope_id, document_key, title),
     )
-    content, page_count, filename, media_type = await _read_document(file, settings)
-    key = _document_key(document_key, filename)
-    try:
-        result = await create_document(
-            session,
-            storage,
-            dispatch,
-            content=content,
-            page_count=page_count,
-            tenant_id=actor.tenant_id,
-            operator_id=actor.subject_id,
-            scope=scope,
-            scope_id=target_scope_id,
-            document_key=key,
-            title=(title or Path(filename).stem)[:255],
-            original_filename=filename,
-            media_type=media_type,
-            data_classification=_classify_document(content, key, settings),
-            trace_id=request_trace_id(request),
-        )
-    except RagDependencyError as exc:
-        raise _error(status.HTTP_503_SERVICE_UNAVAILABLE, exc.code, exc.message) from exc
-    except RagError as exc:
-        raise _error(status.HTTP_409_CONFLICT, exc.code, exc.message) from exc
     if result.duplicate:
         response.status_code = status.HTTP_200_OK
     return document_response(result.document, result.job, duplicate=result.duplicate)

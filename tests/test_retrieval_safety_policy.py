@@ -3,7 +3,7 @@ from hashlib import sha256
 
 import pytest
 
-from erp_assistant.api.routes.knowledge import _classify_document
+from erp_assistant.api.knowledge_upload import classify_document
 from erp_assistant.core.config import Settings
 from erp_assistant.orchestration import provider_factory
 from erp_assistant.orchestration.provider_factory import (
@@ -24,11 +24,11 @@ def test_production_classification_uses_trusted_content_hash_not_client_key() ->
     )
 
     assert (
-        _classify_document(content, "client-selected-ordinary-key", settings)
+        classify_document(content, "client-selected-ordinary-key", settings)
         is DataClassification.RESTRICTED
     )
     with pytest.raises(RagError, match="生产文档必须先在服务端受信分类清单中登记"):
-        _classify_document(b"unknown content", "ordinary-looking-key", settings)
+        classify_document(b"unknown content", "ordinary-looking-key", settings)
 
 
 def test_restricted_provider_endpoint_must_be_in_independent_host_registry() -> None:
