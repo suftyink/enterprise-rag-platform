@@ -4,15 +4,18 @@ from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from erp_assistant.core.config import Settings, get_settings
-from erp_assistant.infrastructure.database import get_session
+from erp_assistant.infrastructure.database import SessionFactory, get_session
 from erp_assistant.orchestration.provider_factory import (
+    get_chat_provider_for,
     get_embedding_provider,
     get_rerank_provider,
 )
 from erp_assistant.orchestration.providers import EmbeddingProvider, RerankProvider
+from erp_assistant.rag.knowledge_assistant import KnowledgeAssistant
 from erp_assistant.rag.profile_bound_retriever import ProfileBoundRetriever
 from erp_assistant.rag.retriever import KnowledgeRetriever
 from erp_assistant.rag.runtime_composition import get_retrieval_runtime_registry
+from erp_assistant.rag.types import DataClassification
 from erp_assistant.rag.vector_store import VectorStore, get_vector_store
 
 
@@ -35,8 +38,21 @@ def get_knowledge_retriever(
         retriever,
         settings,
         runtime_registry=(
-            get_retrieval_runtime_registry()
-            if settings.retrieval_runtime_deployments
-            else None
+            get_retrieval_runtime_registry() if settings.retrieval_runtime_deployments else None
         ),
+    )
+
+
+def get_knowledge_assistant(
+    retriever: Annotated[ProfileBoundRetriever, Depends(get_knowledge_retriever)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> KnowledgeAssistant:
+    return KnowledgeAssistant(
+        retriever=retriever,
+        chat_routes={
+            DataClassification.ORDINARY: get_chat_provider_for(DataClassification.ORDINARY),
+            DataClassification.RESTRICTED: get_chat_provider_for(DataClassification.RESTRICTED),
+        },
+        session_factory=SessionFactory,
+        context_token_budget=settings.answer_context_token_budget,
     )

@@ -1,3 +1,4 @@
+import httpx
 import pytest
 
 from erp_assistant.orchestration.fake_providers import (
@@ -5,7 +6,8 @@ from erp_assistant.orchestration.fake_providers import (
     FakeEmbeddingProvider,
     FakeRerankProvider,
 )
-from erp_assistant.orchestration.providers import ChatMessage
+from erp_assistant.orchestration.http_chat_provider import HttpChatProvider
+from erp_assistant.orchestration.providers import ChatMessage, ProviderBoundary
 
 
 @pytest.mark.asyncio
@@ -14,6 +16,42 @@ async def test_fake_chat_is_deterministic() -> None:
     result = await provider.generate([ChatMessage(role="user", content="hello")])
     assert result.content == "FAKE:hello"
     assert result.model == "fake-chat-v1"
+
+
+@pytest.mark.asyncio
+async def test_http_chat_returns_structured_content_with_bound_identity() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"content": '{"decision":"REFUSED","refusalReason":"NO_EVIDENCE"}'}}
+                ]
+            },
+        )
+
+    async with httpx.AsyncClient(
+        base_url="https://model.example/v1",
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        provider = HttpChatProvider(
+            client,
+            deployment="ordinary-chat-prod",
+            model="grounded-chat",
+            version="v1",
+            boundary=ProviderBoundary.CLOUD,
+            api_key="secret-token",
+        )
+        result = await provider.generate([ChatMessage(role="user", content="question")])
+
+    assert result.model == "grounded-chat:v1"
+    assert result.content == '{"decision":"REFUSED","refusalReason":"NO_EVIDENCE"}'
+    assert requests[0].headers["authorization"] == "Bearer secret-token"
+    assert requests[0].url.path == "/v1/chat/completions"
+    assert requests[0].read().find(b"ordinary-chat-prod") >= 0
 
 
 @pytest.mark.asyncio

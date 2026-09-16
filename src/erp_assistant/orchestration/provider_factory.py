@@ -6,13 +6,16 @@ import httpx
 from erp_assistant.core.config import get_settings
 from erp_assistant.orchestration.fake_providers import (
     FakeEmbeddingProvider,
+    FakeGroundedChatProvider,
     FakeRerankProvider,
 )
+from erp_assistant.orchestration.http_chat_provider import HttpChatProvider
 from erp_assistant.orchestration.http_retrieval_providers import (
     HttpEmbeddingProvider,
     HttpRerankProvider,
 )
 from erp_assistant.orchestration.providers import (
+    ChatProvider,
     EmbeddingProvider,
     ProviderBoundary,
     RerankProvider,
@@ -41,6 +44,7 @@ async def close_retrieval_provider_clients() -> None:
     get_embedding_provider_for.cache_clear()
     get_rerank_provider.cache_clear()
     get_rerank_provider_for.cache_clear()
+    get_chat_provider_for.cache_clear()
     from erp_assistant.rag.runtime_composition import get_retrieval_runtime_registry
 
     get_retrieval_runtime_registry.cache_clear()
@@ -128,6 +132,41 @@ def get_rerank_provider_for(classification: DataClassification) -> RerankProvide
             api_key=str(getattr(settings, f"{prefix}_rerank_api_key")),
         )
     raise ValueError(f"Unsupported rerank provider: {provider}")
+
+
+@lru_cache
+def get_chat_provider_for(classification: DataClassification) -> ChatProvider:
+    if classification is DataClassification.UNCLASSIFIED:
+        raise ValueError("Unclassified data has no chat provider")
+    settings = get_settings()
+    provider = settings.chat_provider
+    if provider == "fake":
+        return FakeGroundedChatProvider()
+    if provider == "http":
+        prefix = "restricted" if classification is DataClassification.RESTRICTED else "ordinary"
+        base_url = str(getattr(settings, f"{prefix}_chat_base_url"))
+        deployment = str(getattr(settings, f"{prefix}_chat_deployment"))
+        model = str(getattr(settings, f"{prefix}_chat_model"))
+        version = str(getattr(settings, f"{prefix}_chat_version"))
+        if not all(value.strip() for value in (base_url, deployment, model, version)):
+            raise ValueError("Chat profile identity is invalid")
+        if classification is DataClassification.RESTRICTED:
+            base_url = validate_restricted_provider_url(
+                base_url, settings.restricted_provider_hosts
+            )
+        return HttpChatProvider(
+            _http_client(base_url, settings.chat_provider_timeout_seconds),
+            deployment=deployment,
+            model=model,
+            version=version,
+            boundary=(
+                ProviderBoundary.INTERNAL
+                if classification is DataClassification.RESTRICTED
+                else ProviderBoundary.CLOUD
+            ),
+            api_key=str(getattr(settings, f"{prefix}_chat_api_key")),
+        )
+    raise ValueError(f"Unsupported chat provider: {provider}")
 
 
 def validate_restricted_provider_url(base_url: str, allowed_hosts: set[str]) -> str:

@@ -49,7 +49,7 @@ class HttpEmbeddingProvider:
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         self.reset_usage()
-        payload = await _post_json(
+        payload = await post_provider_json(
             self._client,
             self._path,
             {"deployment": self.deployment, "model": self.model, "input": texts},
@@ -110,7 +110,7 @@ class HttpRerankProvider:
 
     async def rerank(self, query: str, documents: list[str]) -> list[RankedDocument]:
         self.reset_usage()
-        payload = await _post_json(
+        payload = await post_provider_json(
             self._client,
             self._path,
             {
@@ -139,7 +139,7 @@ class HttpRerankProvider:
         return ranked
 
 
-async def _post_json(
+async def post_provider_json(
     client: httpx.AsyncClient,
     path: str,
     payload: dict[str, object],

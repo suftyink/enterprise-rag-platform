@@ -1,7 +1,7 @@
 # Spec 07：实现引用回答与证据拒答闭环
 
 Type: spec
-Status: ready-for-agent
+Status: resolved
 Blocked by: rag-04-knowledge-governance, rag-05-multiformat-ingestion, rag-06-real-retrieval-quality
 Primary test seam: `KnowledgeAssistant.ask()`
 

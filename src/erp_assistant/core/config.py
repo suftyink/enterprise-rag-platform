@@ -57,6 +57,7 @@ class Settings(BaseSettings):
     )
     redis_url: str = "redis://localhost:6379/0"
     model_provider: str = "fake"
+    chat_provider: str = "fake"
     embedding_provider: str = "fake"
     rerank_provider: str = "fake"
     ordinary_embedding_base_url: str = ""
@@ -81,7 +82,19 @@ class Settings(BaseSettings):
     restricted_rerank_deployment: str = ""
     restricted_rerank_model: str = ""
     restricted_rerank_version: str = ""
+    ordinary_chat_base_url: str = ""
+    ordinary_chat_api_key: str = ""
+    ordinary_chat_deployment: str = ""
+    ordinary_chat_model: str = ""
+    ordinary_chat_version: str = ""
+    restricted_chat_base_url: str = ""
+    restricted_chat_api_key: str = ""
+    restricted_chat_deployment: str = ""
+    restricted_chat_model: str = ""
+    restricted_chat_version: str = ""
     retrieval_provider_timeout_seconds: float = Field(default=10.0, gt=0)
+    chat_provider_timeout_seconds: float = Field(default=30.0, gt=0)
+    answer_context_token_budget: int = Field(default=4_096, ge=64)
     retrieval_runtime_deployments: list[RetrievalRuntimeDeploymentSettings] = Field(
         default_factory=list
     )

@@ -1,5 +1,6 @@
 """SQLAlchemy models."""
 
+from erp_assistant.models.answer import KnowledgeAnswerFeedback, KnowledgeAnswerRun
 from erp_assistant.models.knowledge import (
     KnowledgeChunk,
     KnowledgeCleanupRequest,
@@ -16,6 +17,8 @@ from erp_assistant.models.task import AiTask, AiTaskMessage
 __all__ = [
     "AiTask",
     "AiTaskMessage",
+    "KnowledgeAnswerFeedback",
+    "KnowledgeAnswerRun",
     "KnowledgeChunk",
     "KnowledgeCleanupRequest",
     "KnowledgeCorpusGeneration",

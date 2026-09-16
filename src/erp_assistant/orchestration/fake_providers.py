@@ -1,3 +1,4 @@
+import json
 import math
 import re
 from hashlib import sha256
@@ -15,6 +16,33 @@ class FakeChatProvider:
     async def generate(self, messages: list[ChatMessage]) -> ChatResult:
         content = messages[-1].content if messages else ""
         return ChatResult(content=f"FAKE:{content}", model="fake-chat-v1")
+
+
+class FakeGroundedChatProvider:
+    boundary = ProviderBoundary.INTERNAL
+    production_ready = False
+    model = "fake-grounded-chat-v1"
+
+    async def generate(self, messages: list[ChatMessage]) -> ChatResult:
+        try:
+            request = json.loads(messages[-1].content)
+            evidence = request["evidence"]
+            first = evidence[0]
+            payload: dict[str, object] = {
+                "decision": "ANSWERED",
+                "answerUnits": [
+                    {
+                        "text": first["content"],
+                        "evidenceIds": [first["evidenceId"]],
+                    }
+                ],
+            }
+        except (IndexError, KeyError, TypeError, json.JSONDecodeError):
+            payload = {
+                "decision": "REFUSED",
+                "refusalReason": "INSUFFICIENT_KNOWLEDGE",
+            }
+        return ChatResult(content=json.dumps(payload), model=self.model)
 
 
 class FakeEmbeddingProvider:

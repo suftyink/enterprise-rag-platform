@@ -4,12 +4,12 @@
 
 **Blocked by:** rag-04-knowledge-governance/03 / 支持回滚、清理补偿与并发审计; rag-05-multiformat-ingestion/04 / 统一解析质量、安全限制与版本信息; rag-06-real-retrieval-quality/03 / 评测调优并激活合格索引 Profile.
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] 有合格证据的问题返回 ANSWERED、答案单元和至少一个有效引用。
-- [ ] 引用包含真实 document identity、version、title、source locator 和 excerpt。
-- [ ] 模型只能引用请求上下文中预分配的 evidence ID。
-- [ ] 文档、版本、页码、章节和摘录全部由代码从证据映射。
-- [ ] Retriever 返回证据不足时不调用 Chat Provider，并返回明确拒答。
-- [ ] 只有当前已发布、仍有权限访问的证据可以进入答案。
-- [ ] Chat 模型按证据敏感级别选择允许的运行位置。
+- [x] 有合格证据的问题返回 ANSWERED、答案单元和至少一个有效引用。
+- [x] 引用包含真实 document identity、version、title、source locator 和 excerpt。
+- [x] 模型只能引用请求上下文中预分配的 evidence ID。
+- [x] 文档、版本、页码、章节和摘录全部由代码从证据映射。
+- [x] Retriever 返回证据不足时不调用 Chat Provider，并返回明确拒答。
+- [x] 只有当前已发布、仍有权限访问的证据可以进入答案。
+- [x] Chat 模型按证据敏感级别选择允许的运行位置。

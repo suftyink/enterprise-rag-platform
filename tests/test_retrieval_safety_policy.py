@@ -6,7 +6,10 @@ import pytest
 from erp_assistant.api.routes.knowledge import _classify_document
 from erp_assistant.core.config import Settings
 from erp_assistant.orchestration import provider_factory
-from erp_assistant.orchestration.provider_factory import validate_restricted_provider_url
+from erp_assistant.orchestration.provider_factory import (
+    get_chat_provider_for,
+    validate_restricted_provider_url,
+)
 from erp_assistant.rag.errors import RagError
 from erp_assistant.rag.runtime_composition import build_retrieval_runtime_registry
 from erp_assistant.rag.types import DataClassification
@@ -57,6 +60,27 @@ def test_invalid_http_profile_is_rejected_before_allocating_client(
 
     with pytest.raises(ValueError, match="profile identity"):
         provider_factory.get_embedding_provider_for(DataClassification.ORDINARY)
+
+    assert len(provider_factory._http_clients) == before
+
+
+def test_restricted_chat_route_is_validated_before_allocating_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        chat_provider="http",
+        restricted_chat_base_url="https://public-provider.example/v1",
+        restricted_chat_deployment="restricted-chat-v1",
+        restricted_chat_model="grounded-chat",
+        restricted_chat_version="v1",
+        restricted_provider_allowed_hosts="internal-model.corp",
+    )
+    monkeypatch.setattr(provider_factory, "get_settings", lambda: settings)
+    get_chat_provider_for.cache_clear()
+    before = len(provider_factory._http_clients)
+
+    with pytest.raises(ValueError, match="trusted host registry"):
+        get_chat_provider_for(DataClassification.RESTRICTED)
 
     assert len(provider_factory._http_clients) == before
 
