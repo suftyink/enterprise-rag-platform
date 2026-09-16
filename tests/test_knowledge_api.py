@@ -11,7 +11,7 @@ from sqlalchemy.pool import StaticPool
 
 from erp_assistant.api.dependencies import get_current_actor, get_identity_access
 from erp_assistant.core.config import Settings, get_settings
-from erp_assistant.identity import IdentityRole
+from erp_assistant.identity import IdentityRole, KnowledgeScopeRef
 from erp_assistant.infrastructure.database import Base, get_session
 from erp_assistant.infrastructure.object_storage import get_object_storage
 from erp_assistant.main import app
@@ -20,7 +20,7 @@ from erp_assistant.models.knowledge import (
     KnowledgeDocument,
     KnowledgeIndexJob,
 )
-from erp_assistant.rag.types import DocumentStatus
+from erp_assistant.rag.types import DocumentStatus, KnowledgeScope
 from erp_assistant.rag.vector_store import VectorHit, get_vector_store
 from erp_assistant.workers.dispatcher import get_document_dispatcher
 from tests.document_factory import make_docx
@@ -69,11 +69,11 @@ class FakeVectorStore:
         self,
         query: str,
         vector: list[float],
-        tenant_id: str,
+        scopes: tuple[KnowledgeScopeRef, ...],
         limit: int,
         rrf_k: int,
     ) -> list[VectorHit]:
-        del query, vector, tenant_id, rrf_k
+        del query, vector, scopes, rrf_k
         return self.hits[:limit]
 
 
@@ -123,6 +123,7 @@ async def _upload(
     *,
     content: bytes | None = None,
     scope: str = "TENANT",
+    scope_id: str | None = None,
     document_key: str = "inventory-sop",
     filename: str = "inventory.pdf",
     media_type: str = "application/pdf",
@@ -141,6 +142,7 @@ async def _upload(
         data={
             "scope": scope,
             "documentKey": document_key,
+            **({"scopeId": scope_id} if scope_id is not None else {}),
         },
     )
 
@@ -308,6 +310,47 @@ async def test_upload_validation_and_global_gate(
 
 
 @pytest.mark.asyncio
+async def test_upload_to_an_assigned_shared_scope(
+    knowledge_api: KnowledgeApiContext,
+) -> None:
+    client, factory, _, _ = knowledge_api
+    shared_actor, shared_access = trusted_identity(
+        "shared-admin",
+        "tenant-a",
+        roles=frozenset({IdentityRole.KNOWLEDGE_ADMIN}),
+        additional_scopes=frozenset(
+            {KnowledgeScopeRef(KnowledgeScope.SHARED, "finance")}
+        ),
+    )
+    app.dependency_overrides[get_current_actor] = lambda: shared_actor
+    app.dependency_overrides[get_identity_access] = lambda: shared_access
+
+    uploaded = await _upload(
+        client,
+        scope="SHARED",
+        scope_id="finance",
+        document_key="shared-finance-policy",
+    )
+    denied = await _upload(
+        client,
+        scope="SHARED",
+        scope_id="legal",
+        document_key="shared-legal-policy",
+    )
+
+    assert uploaded.status_code == 202
+    assert uploaded.json()["scope"] == "SHARED"
+    assert denied.status_code == 404
+    async with factory() as session:
+        document = await session.get(
+            KnowledgeDocument,
+            UUID(uploaded.json()["documentId"]),
+        )
+    assert document is not None
+    assert document.scope_id == "finance"
+
+
+@pytest.mark.asyncio
 async def test_retry_failed_but_not_ocr_document(
     knowledge_api: KnowledgeApiContext,
 ) -> None:
@@ -350,6 +393,29 @@ async def test_retry_failed_but_not_ocr_document(
         json={},
     )
     assert ocr_retry.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_inaccessible_and_missing_documents_have_the_same_response(
+    knowledge_api: KnowledgeApiContext,
+) -> None:
+    client, factory, _, _ = knowledge_api
+    inaccessible = _ready_document("TENANT", "tenant-b", "other-tenant")
+    async with factory() as session:
+        session.add(inaccessible)
+        await session.commit()
+
+    denied = await client.get(
+        f"/api/assistant/v1/knowledge/documents/{inaccessible.id}"
+    )
+    missing = await client.get(
+        f"/api/assistant/v1/knowledge/documents/{uuid4()}"
+    )
+
+    assert denied.status_code == missing.status_code == 404
+    assert denied.json() == missing.json() == {
+        "detail": {"code": "RESOURCE_NOT_FOUND", "message": "资源不存在"}
+    }
 
 
 @pytest.mark.asyncio

@@ -4,14 +4,14 @@ from enum import StrEnum
 from typing import Protocol
 from uuid import UUID, uuid4
 
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from erp_assistant.identity import (
     IdentityAccess,
     IdentityAction,
     IdentityDenied,
-    IdentityResource,
+    KnowledgeScopeRef,
 )
 from erp_assistant.models.answer import KnowledgeAnswerFeedback, KnowledgeAnswerRun
 from erp_assistant.models.knowledge import KnowledgeDocument
@@ -22,14 +22,17 @@ from erp_assistant.orchestration.providers import (
 )
 from erp_assistant.rag.answer_feedback_store import AnswerFeedbackStore
 from erp_assistant.rag.errors import RagDependencyError, RagError
-from erp_assistant.rag.knowledge_eligibility import retrieval_eligibility_filters
+from erp_assistant.rag.knowledge_eligibility import (
+    authorized_scope_filter,
+    retrieval_eligibility_filters,
+)
 from erp_assistant.rag.retriever import (
     ActorContext,
     RetrievalEvidence,
     RetrievalOutcome,
     RetrievalRequest,
 )
-from erp_assistant.rag.types import DataClassification, KnowledgeScope, SearchDecision
+from erp_assistant.rag.types import DataClassification, SearchDecision
 
 
 class AnswerDecision(StrEnum):
@@ -139,7 +142,9 @@ class KnowledgeAssistant:
         if not request.actor.is_trusted:
             raise RagError("UNTRUSTED_ACTOR", "回答请求缺少可信身份")
         trace_id = uuid4()
-        await self._authorize(request.actor, IdentityAction.ANSWER, trace_id)
+        authorized_scopes = await self._authorize(
+            request.actor, IdentityAction.ANSWER, trace_id
+        )
         retrieval = await self._retriever.retrieve(
             RetrievalRequest(
                 query=request.question,
@@ -161,11 +166,15 @@ class KnowledgeAssistant:
                 ),
             )
         context_evidence = self._select_context(retrieval.evidence)
-        await self._authorize(request.actor, IdentityAction.ANSWER, trace_id)
+        authorized_scopes = await self._authorize(
+            request.actor, IdentityAction.ANSWER, trace_id
+        )
         evidence_by_id = {
             f"E{index}": evidence for index, evidence in enumerate(context_evidence, start=1)
         }
-        if not await self._evidence_is_current(request, context_evidence):
+        if not await self._evidence_is_current(
+            request, context_evidence, authorized_scopes
+        ):
             return await self._finish(
                 request,
                 AnswerOutcome(
@@ -228,7 +237,9 @@ class KnowledgeAssistant:
                     reason="CHAT_PROVIDER_UNAVAILABLE",
                 ),
             )
-        await self._authorize(request.actor, IdentityAction.ANSWER, trace_id)
+        authorized_scopes = await self._authorize(
+            request.actor, IdentityAction.ANSWER, trace_id
+        )
         parsed = self._parse_answer(result.content)
         if parsed is None:
             return await self._finish(
@@ -283,7 +294,9 @@ class KnowledgeAssistant:
                 ),
             )
         cited_evidence = {item: evidence_by_id[item] for item in cited_ids}
-        if not await self._evidence_is_current(request, context_evidence):
+        if not await self._evidence_is_current(
+            request, context_evidence, authorized_scopes
+        ):
             return await self._finish(
                 request,
                 AnswerOutcome(
@@ -339,17 +352,11 @@ class KnowledgeAssistant:
         actor: ActorContext,
         action: IdentityAction,
         trace_id: UUID,
-    ) -> None:
+    ) -> tuple[KnowledgeScopeRef, ...]:
         try:
-            await self._identity.authorize(
+            return await self._identity.authorize_read_scopes(
                 actor,
                 action,
-                IdentityResource(
-                    resource_type="knowledge_scope",
-                    resource_id=actor.tenant_id,
-                    scope=KnowledgeScope.TENANT,
-                    scope_id=actor.tenant_id,
-                ),
                 trace_id=trace_id,
             )
         except IdentityDenied as exc:
@@ -507,6 +514,7 @@ class KnowledgeAssistant:
         self,
         request: AnswerRequest,
         evidence: tuple[RetrievalEvidence, ...],
+        authorized_scopes: tuple[KnowledgeScopeRef, ...],
     ) -> bool:
         async with self._sessions() as session:
             rows = (
@@ -515,13 +523,7 @@ class KnowledgeAssistant:
                         KnowledgeDocument.id.in_([item.document_id for item in evidence]),
                         *retrieval_eligibility_filters(),
                         KnowledgeDocument.data_classification == request.data_classification.value,
-                        or_(
-                            KnowledgeDocument.scope == KnowledgeScope.GLOBAL.value,
-                            (
-                                (KnowledgeDocument.scope == KnowledgeScope.TENANT.value)
-                                & (KnowledgeDocument.scope_id == request.actor.tenant_id)
-                            ),
-                        ),
+                        authorized_scope_filter(authorized_scopes),
                     )
                 )
             ).all()

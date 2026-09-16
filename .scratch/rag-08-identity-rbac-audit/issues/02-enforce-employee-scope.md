@@ -16,4 +16,4 @@
 
 ## Answer
 
-Retriever 与 KnowledgeAssistant 在执行前后均通过 `IdentityAccess` 复核最新成员关系；证据按可信范围过滤，撤权与跨租户拒绝统一返回非泄漏错误并记录 trace 审计。
+Retriever 与 KnowledgeAssistant 在执行前后均通过 `IdentityAccess` 复核最新成员关系；租户、全局和显式分配的共享范围逐一授权、审计，并作为 SQL/Milvus 的共同过滤条件。共享范围支持经授权入库；撤权、跨租户拒绝和不存在资源统一返回非泄漏错误并记录 trace 审计。

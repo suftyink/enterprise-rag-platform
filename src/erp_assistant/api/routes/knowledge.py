@@ -60,6 +60,7 @@ from erp_assistant.rag.retriever import RetrievalRequest
 from erp_assistant.rag.service import (
     create_document,
     retry_document,
+    scope_id_for,
 )
 from erp_assistant.rag.types import (
     DataClassification,
@@ -198,16 +199,20 @@ async def upload_document(
     storage: Annotated[ObjectStorage, Depends(get_object_storage)],
     dispatch: Annotated[DocumentDispatcher, Depends(get_document_dispatcher)],
     scope: Annotated[KnowledgeScope, Form()] = KnowledgeScope.TENANT,
+    scope_id: Annotated[str | None, Form(alias="scopeId", max_length=64)] = None,
     document_key: Annotated[str | None, Form(alias="documentKey", max_length=128)] = None,
     title: Annotated[str | None, Form(max_length=255)] = None,
 ) -> KnowledgeDocumentResponse:
     _require_rag(settings)
-    scope_id = "GLOBAL" if scope is KnowledgeScope.GLOBAL else actor.tenant_id
+    try:
+        target_scope_id = scope_id_for(scope, actor.tenant_id, scope_id)
+    except RagError as exc:
+        raise _error(status.HTTP_422_UNPROCESSABLE_CONTENT, exc.code, exc.message) from exc
     await authorize_or_not_found(
         access,
         actor,
         IdentityAction.PUBLISH_GLOBAL if scope is KnowledgeScope.GLOBAL else IdentityAction.UPLOAD,
-        IdentityResource("knowledge_scope", scope_id, scope, scope_id),
+        IdentityResource("knowledge_scope", target_scope_id, scope, target_scope_id),
         request,
     )
     content, page_count, filename, media_type = await _read_document(file, settings)
@@ -222,6 +227,7 @@ async def upload_document(
             tenant_id=actor.tenant_id,
             operator_id=actor.subject_id,
             scope=scope,
+            scope_id=target_scope_id,
             document_key=key,
             title=(title or Path(filename).stem)[:255],
             original_filename=filename,
@@ -247,7 +253,7 @@ async def get_document_status(
 ) -> KnowledgeDocumentResponse:
     document = await session.get(KnowledgeDocument, document_id)
     if document is None:
-        raise _error(status.HTTP_404_NOT_FOUND, "DOCUMENT_NOT_FOUND", "文档不存在")
+        raise _error(status.HTTP_404_NOT_FOUND, "RESOURCE_NOT_FOUND", "资源不存在")
     await authorize_or_not_found(
         access,
         actor,
@@ -277,7 +283,7 @@ async def retry_failed_document(
     del payload
     document = await session.get(KnowledgeDocument, document_id)
     if document is None:
-        raise _error(status.HTTP_404_NOT_FOUND, "DOCUMENT_NOT_FOUND", "文档不存在")
+        raise _error(status.HTTP_404_NOT_FOUND, "RESOURCE_NOT_FOUND", "资源不存在")
     await authorize_or_not_found(
         access,
         actor,

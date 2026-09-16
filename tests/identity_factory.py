@@ -31,10 +31,12 @@ def trusted_actor(
     *,
     roles: frozenset[IdentityRole] | None = None,
     include_global: bool = True,
+    additional_scopes: frozenset[KnowledgeScopeRef] = frozenset(),
 ) -> ActorContext:
     scopes = {KnowledgeScopeRef(KnowledgeScope.TENANT, tenant_id)}
     if include_global:
         scopes.add(KnowledgeScopeRef(KnowledgeScope.GLOBAL, "GLOBAL"))
+    scopes.update(additional_scopes)
     membership = IdentityMembership(
         tenant_id=tenant_id,
         roles=(
@@ -52,12 +54,14 @@ def trusted_identity(
     *,
     roles: frozenset[IdentityRole],
     include_global: bool = False,
+    additional_scopes: frozenset[KnowledgeScopeRef] = frozenset(),
 ) -> tuple[ActorContext, IdentityAccess]:
     actor = trusted_actor(
         subject_id,
         tenant_id,
         roles=roles,
         include_global=include_global,
+        additional_scopes=additional_scopes,
     )
     membership = IdentityMembership(
         tenant_id=actor.tenant_id,

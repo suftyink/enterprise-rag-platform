@@ -30,6 +30,7 @@ from erp_assistant.evaluation.profiles import (
     SqlRetrievalProfileStore,
 )
 from erp_assistant.evaluation.retrieval import RetrievalEvaluator
+from erp_assistant.identity import KnowledgeScopeRef
 from erp_assistant.infrastructure.database import Base
 from erp_assistant.models.knowledge import (
     KnowledgeChunk,
@@ -87,11 +88,11 @@ class OneHitVectorStore:
         self,
         query: str,
         vector: list[float],
-        tenant_id: str,
+        scopes: tuple[KnowledgeScopeRef, ...],
         limit: int,
         rrf_k: int,
     ) -> list[VectorHit]:
-        del query, vector, tenant_id, limit, rrf_k
+        del query, vector, scopes, limit, rrf_k
         return [VectorHit(chunk_id=self._chunk_id, score=0.9)]
 
     def upsert_document(
@@ -118,13 +119,13 @@ class FirstHitThenEmptyVectorStore(OneHitVectorStore):
         self,
         query: str,
         vector: list[float],
-        tenant_id: str,
+        scopes: tuple[KnowledgeScopeRef, ...],
         limit: int,
         rrf_k: int,
     ) -> list[VectorHit]:
         self._calls += 1
         if self._calls == 1:
-            return super().search(query, vector, tenant_id, limit, rrf_k)
+            return super().search(query, vector, scopes, limit, rrf_k)
         return []
 
 

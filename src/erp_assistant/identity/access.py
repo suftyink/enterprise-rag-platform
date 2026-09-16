@@ -133,6 +133,36 @@ class IdentityAccess:
             trace_id=trace_id,
         )
 
+    async def authorize_read_scopes(
+        self,
+        actor: ActorContext,
+        action: IdentityAction,
+        *,
+        trace_id: UUID,
+    ) -> tuple[KnowledgeScopeRef, ...]:
+        if action not in _READ_ACTIONS:
+            raise ValueError("authorize_read_scopes only accepts read actions")
+        scopes = {
+            scope
+            for scope in actor.knowledge_scopes
+            if scope.scope is not KnowledgeScope.TENANT
+        }
+        scopes.add(KnowledgeScopeRef(KnowledgeScope.TENANT, actor.tenant_id))
+        ordered = tuple(sorted(scopes, key=lambda item: (item.scope.value, item.scope_id)))
+        for scope in ordered:
+            await self.authorize(
+                actor,
+                action,
+                IdentityResource(
+                    resource_type="knowledge_scope",
+                    resource_id=scope.scope_id,
+                    scope=scope.scope,
+                    scope_id=scope.scope_id,
+                ),
+                trace_id=trace_id,
+            )
+        return ordered
+
     async def _denial_reason(
         self,
         actor: ActorContext,
@@ -171,10 +201,7 @@ class IdentityAccess:
         if action in _GOVERNANCE_ACTIONS:
             if IdentityRole.SYSTEM_ADMIN in actor.roles:
                 return None
-            scope_allowed = resource.scope is KnowledgeScope.TENANT and (
-                resource.scope_id == actor.tenant_id
-                and resource_scope(resource) in actor.knowledge_scopes
-            )
+            scope_allowed = resource_scope(resource) in actor.knowledge_scopes
             role_allowed = IdentityRole.KNOWLEDGE_ADMIN in actor.roles
             return None if scope_allowed and role_allowed else "GOVERNANCE_SCOPE_DENIED"
         return "ACTION_DENIED"

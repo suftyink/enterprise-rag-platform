@@ -8,9 +8,8 @@ from math import isfinite
 from time import perf_counter
 from uuid import UUID, uuid4
 
-from sqlalchemy import false, or_, select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.sql.elements import ColumnElement
 
 from erp_assistant.core.config import Settings
 from erp_assistant.identity import (
@@ -18,7 +17,7 @@ from erp_assistant.identity import (
     IdentityAccess,
     IdentityAction,
     IdentityDenied,
-    IdentityResource,
+    KnowledgeScopeRef,
 )
 from erp_assistant.models.knowledge import KnowledgeChunk, KnowledgeDocument
 from erp_assistant.orchestration.providers import (
@@ -28,7 +27,10 @@ from erp_assistant.orchestration.providers import (
     RerankProvider,
 )
 from erp_assistant.rag.errors import RagDependencyError, RagError
-from erp_assistant.rag.knowledge_eligibility import retrieval_eligibility_filters
+from erp_assistant.rag.knowledge_eligibility import (
+    authorized_scope_filter,
+    retrieval_eligibility_filters,
+)
 from erp_assistant.rag.types import DataClassification, KnowledgeScope, SearchDecision
 from erp_assistant.rag.vector_store import VectorStore
 
@@ -160,7 +162,7 @@ class KnowledgeRetriever:
 
     async def retrieve(self, request: RetrievalRequest) -> RetrievalOutcome:
         request = self._normalize_request(request)
-        await self._authorize(request)
+        authorized_scopes = await self._authorize(request)
         self._reset_provider_usage()
         if request.data_classification is DataClassification.UNCLASSIFIED:
             raise RagDependencyError(
@@ -180,7 +182,7 @@ class KnowledgeRetriever:
                 "INDEX_BINDING_MISMATCH", "查询 Embedding 维度与活动索引绑定不一致"
             )
         started = perf_counter()
-        evidence = await self._retrieve_evidence(request)
+        evidence = await self._retrieve_evidence(request, authorized_scopes)
         await self._authorize(request)
         return RetrievalOutcome(
             decision=(
@@ -209,7 +211,11 @@ class KnowledgeRetriever:
             ),
         )
 
-    async def _retrieve_evidence(self, request: RetrievalRequest) -> tuple[RetrievalEvidence, ...]:
+    async def _retrieve_evidence(
+        self,
+        request: RetrievalRequest,
+        authorized_scopes: tuple[KnowledgeScopeRef, ...],
+    ) -> tuple[RetrievalEvidence, ...]:
         candidate_limit = min(
             self._settings.rag_max_candidates,
             max(20, request.evidence_limit * self._settings.rag_candidate_multiplier),
@@ -217,16 +223,7 @@ class KnowledgeRetriever:
         index_filter = KnowledgeChunk.index_identity == self.index_identity
         if self._settings.app_env.casefold() != "production":
             index_filter = or_(index_filter, KnowledgeChunk.index_identity == "legacy")
-        scope_filter: ColumnElement[bool] = false()
-        if request.actor.can_read(KnowledgeScope.TENANT, request.actor.tenant_id):
-            scope_filter = (KnowledgeDocument.scope == KnowledgeScope.TENANT.value) & (
-                KnowledgeDocument.scope_id == request.actor.tenant_id
-            )
-        if request.actor.can_read(KnowledgeScope.GLOBAL, "GLOBAL"):
-            scope_filter = or_(
-                scope_filter,
-                KnowledgeDocument.scope == KnowledgeScope.GLOBAL.value,
-            )
+        scope_filter = authorized_scope_filter(authorized_scopes)
         try:
             vector = (await self._embedding.embed([request.query]))[0]
         except RagDependencyError:
@@ -238,7 +235,7 @@ class KnowledgeRetriever:
                 self._vector_store.search,
                 request.query,
                 vector,
-                request.actor.tenant_id,
+                authorized_scopes,
                 candidate_limit,
                 self._settings.rag_rrf_k,
             )
@@ -356,17 +353,13 @@ class KnowledgeRetriever:
             trace_id=request.trace_id,
         )
 
-    async def _authorize(self, request: RetrievalRequest) -> None:
+    async def _authorize(
+        self, request: RetrievalRequest
+    ) -> tuple[KnowledgeScopeRef, ...]:
         try:
-            await self._identity.authorize(
+            return await self._identity.authorize_read_scopes(
                 request.actor,
                 IdentityAction.SEARCH,
-                IdentityResource(
-                    resource_type="knowledge_scope",
-                    resource_id=request.actor.tenant_id,
-                    scope=KnowledgeScope.TENANT,
-                    scope_id=request.actor.tenant_id,
-                ),
                 trace_id=request.trace_id,
             )
         except IdentityDenied as exc:

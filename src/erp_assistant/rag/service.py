@@ -1,11 +1,12 @@
 import asyncio
+import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
-from typing import cast
-from uuid import UUID, uuid4
+from uuid import uuid4
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from erp_assistant.infrastructure.object_storage import ObjectStorage
@@ -36,8 +37,19 @@ class DocumentCreateResult:
     duplicate: bool
 
 
-def scope_id_for(scope: KnowledgeScope, tenant_id: str) -> str:
-    return "GLOBAL" if scope is KnowledgeScope.GLOBAL else tenant_id
+def scope_id_for(
+    scope: KnowledgeScope,
+    tenant_id: str,
+    requested_scope_id: str | None = None,
+) -> str:
+    if scope is KnowledgeScope.GLOBAL:
+        return "GLOBAL"
+    if scope is KnowledgeScope.SHARED:
+        value = unicodedata.normalize("NFKC", requested_scope_id or "").strip()
+        if not re.fullmatch(r"[\w.-]{1,64}", value, flags=re.UNICODE):
+            raise RagError("INVALID_SCOPE_ID", "共享知识范围编号无效")
+        return value
+    return tenant_id
 
 
 async def create_document(
@@ -50,6 +62,7 @@ async def create_document(
     tenant_id: str,
     operator_id: str,
     scope: KnowledgeScope,
+    scope_id: str | None = None,
     document_key: str,
     title: str,
     original_filename: str,
@@ -58,7 +71,7 @@ async def create_document(
 ) -> DocumentCreateResult:
     if data_classification is DataClassification.UNCLASSIFIED:
         raise RagError("DOCUMENT_CLASSIFICATION_REQUIRED", "必须先完成可信文档分类")
-    owner = scope_id_for(scope, tenant_id)
+    owner = scope_id_for(scope, tenant_id, scope_id)
     digest = sha256(content).hexdigest()
     duplicate = await session.scalar(
         select(KnowledgeDocument).where(
@@ -158,26 +171,6 @@ async def create_document(
         await session.commit()
         raise RagDependencyError(document.error_code, "文件保存或任务入队失败") from exc
     return DocumentCreateResult(document=document, job=job, duplicate=False)
-
-
-async def accessible_document(
-    session: AsyncSession, document_id: UUID, tenant_id: str
-) -> KnowledgeDocument | None:
-    return cast(
-        KnowledgeDocument | None,
-        await session.scalar(
-            select(KnowledgeDocument).where(
-                KnowledgeDocument.id == document_id,
-                or_(
-                    KnowledgeDocument.scope == KnowledgeScope.GLOBAL.value,
-                    (
-                        (KnowledgeDocument.scope == KnowledgeScope.TENANT.value)
-                        & (KnowledgeDocument.scope_id == tenant_id)
-                    ),
-                ),
-            )
-        ),
-    )
 
 
 async def retry_document(

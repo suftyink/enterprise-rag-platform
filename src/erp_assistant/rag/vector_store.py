@@ -15,6 +15,7 @@ from pymilvus import (
 )
 
 from erp_assistant.core.config import get_settings
+from erp_assistant.identity.models import KnowledgeScopeRef
 from erp_assistant.orchestration.provider_factory import get_embedding_provider_for
 from erp_assistant.orchestration.providers import embedding_binding_fingerprint
 from erp_assistant.rag.chunker import ChunkDraft
@@ -46,7 +47,7 @@ class VectorStore(Protocol):
         self,
         query: str,
         vector: list[float],
-        tenant_id: str,
+        scopes: tuple[KnowledgeScopeRef, ...],
         limit: int,
         rrf_k: int,
     ) -> list[VectorHit]: ...
@@ -192,22 +193,25 @@ class MilvusVectorStore:
         self,
         query: str,
         vector: list[float],
-        tenant_id: str,
+        scopes: tuple[KnowledgeScopeRef, ...],
         limit: int,
         rrf_k: int,
     ) -> list[VectorHit]:
+        if not scopes:
+            return []
         client = self._client()
         try:
             if not client.has_collection(self.collection):
                 return []
-            global_scope = json.dumps("GLOBAL")
-            tenant_scope = json.dumps("TENANT")
-            tenant = json.dumps(tenant_id)
             embedding_binding = json.dumps(self.embedding_binding)
+            scope_expression = " or ".join(
+                "(scope == "
+                f"{json.dumps(scope.scope.value)} and scope_id == {json.dumps(scope.scope_id)})"
+                for scope in scopes
+            )
             expression = (
                 f"embedding_binding == {embedding_binding} and "
-                f"((scope == {global_scope}) or "
-                f"(scope == {tenant_scope} and scope_id == {tenant}))"
+                f"({scope_expression})"
             )
             dense_request = AnnSearchRequest(
                 data=[vector],

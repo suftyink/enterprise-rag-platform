@@ -40,6 +40,7 @@ def KnowledgeRetriever(**kwargs: object) -> _KnowledgeRetriever:  # type: ignore
 class RecordingVectorStore:
     hits: list[VectorHit] = field(default_factory=list)
     queries: list[str] = field(default_factory=list)
+    searched_scopes: tuple[KnowledgeScopeRef, ...] = ()
 
     def upsert_document(
         self,
@@ -59,12 +60,13 @@ class RecordingVectorStore:
         self,
         query: str,
         vector: list[float],
-        tenant_id: str,
+        scopes: tuple[KnowledgeScopeRef, ...],
         limit: int,
         rrf_k: int,
     ) -> list[VectorHit]:
-        del vector, tenant_id, rrf_k
+        del vector, rrf_k
         self.queries.append(query)
+        self.searched_scopes = scopes
         return self.hits[:limit]
 
 
@@ -321,6 +323,40 @@ async def test_retrieve_returns_only_ready_active_permitted_evidence(
         "tenant-policy",
         "global-policy",
     }
+
+
+@pytest.mark.asyncio
+async def test_retrieve_includes_only_explicitly_assigned_shared_scopes(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    permitted = _ready_document("SHARED", "finance", "finance-policy")
+    denied = _ready_document("SHARED", "legal", "legal-policy")
+    chunks = [_chunk(document, "shared policy evidence") for document in (permitted, denied)]
+    vector_store = RecordingVectorStore(
+        hits=[VectorHit(chunk_id=chunk.id, score=0.9) for chunk in chunks]
+    )
+    actor = ActorContext(
+        subject_id="shared-user",
+        tenant_id="tenant-a",
+        include_global=False,
+        additional_scopes=frozenset(
+            {KnowledgeScopeRef(KnowledgeScope.SHARED, "finance")}
+        ),
+    )
+    async with session_factory() as session:
+        session.add_all([permitted, denied, *chunks])
+        await session.commit()
+        outcome = await KnowledgeRetriever(
+            session=session,
+            vector_store=vector_store,
+            embedding=FakeEmbeddingProvider(),
+            reranker=FakeRerankProvider(),
+            settings=Settings(rag_enabled=True),
+        ).retrieve(RetrievalRequest(query="shared policy", actor=actor))
+
+    assert [evidence.document_key for evidence in outcome.evidence] == ["finance-policy"]
+    assert KnowledgeScopeRef(KnowledgeScope.SHARED, "finance") in vector_store.searched_scopes
+    assert KnowledgeScopeRef(KnowledgeScope.SHARED, "legal") not in vector_store.searched_scopes
 
 
 @pytest.mark.asyncio
@@ -617,11 +653,11 @@ class FailingVectorStore(RecordingVectorStore):
         self,
         query: str,
         vector: list[float],
-        tenant_id: str,
+        scopes: tuple[KnowledgeScopeRef, ...],
         limit: int,
         rrf_k: int,
     ) -> list[VectorHit]:
-        del query, vector, tenant_id, limit, rrf_k
+        del query, vector, scopes, limit, rrf_k
         raise RuntimeError("vector store unavailable")
 
 

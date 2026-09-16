@@ -70,8 +70,8 @@ class ActorContext:
     def can_read(self, scope: KnowledgeScope, scope_id: str) -> bool:
         if not self.is_trusted:
             return False
-        if scope is KnowledgeScope.TENANT and scope_id == self.tenant_id:
-            return True
+        if scope is KnowledgeScope.TENANT:
+            return scope_id == self.tenant_id
         return KnowledgeScopeRef(scope, scope_id) in self.knowledge_scopes
 
     @classmethod

@@ -185,6 +185,80 @@ async def test_employee_and_administrator_permission_matrix_is_scope_bound() -> 
 
 
 @pytest.mark.asyncio
+async def test_read_scope_authorization_includes_assigned_global_and_shared_scopes() -> None:
+    membership = IdentityMembership(
+        tenant_id="tenant-a",
+        roles=frozenset({IdentityRole.INTERNAL_EMPLOYEE}),
+        knowledge_scopes=frozenset(
+            {
+                KnowledgeScopeRef(KnowledgeScope.TENANT, "tenant-a"),
+                KnowledgeScopeRef(KnowledgeScope.GLOBAL, "GLOBAL"),
+                KnowledgeScopeRef(KnowledgeScope.SHARED, "finance"),
+            }
+        ),
+    )
+    access, _, audit = _access(membership)
+    actor = await access.authenticate("valid", trace_id=uuid4())
+    trace_id = uuid4()
+
+    scopes = await access.authorize_read_scopes(
+        actor,
+        IdentityAction.SEARCH,
+        trace_id=trace_id,
+    )
+
+    assert scopes == (
+        KnowledgeScopeRef(KnowledgeScope.GLOBAL, "GLOBAL"),
+        KnowledgeScopeRef(KnowledgeScope.SHARED, "finance"),
+        KnowledgeScopeRef(KnowledgeScope.TENANT, "tenant-a"),
+    )
+    scope_events = [event for event in audit.events if event.trace_id == trace_id]
+    assert {(event.resource_type, event.resource_id) for event in scope_events} == {
+        ("knowledge_scope", "GLOBAL"),
+        ("knowledge_scope", "finance"),
+        ("knowledge_scope", "tenant-a"),
+    }
+    assert all(event.outcome == "ALLOWED" for event in scope_events)
+
+
+@pytest.mark.asyncio
+async def test_cross_tenant_scope_mapping_cannot_expand_employee_access() -> None:
+    membership = IdentityMembership(
+        tenant_id="tenant-a",
+        roles=frozenset({IdentityRole.INTERNAL_EMPLOYEE}),
+        knowledge_scopes=frozenset(
+            {
+                KnowledgeScopeRef(KnowledgeScope.TENANT, "tenant-a"),
+                KnowledgeScopeRef(KnowledgeScope.TENANT, "tenant-b"),
+            }
+        ),
+    )
+    access, _, _ = _access(membership)
+    actor = await access.authenticate("valid", trace_id=uuid4())
+
+    scopes = await access.authorize_read_scopes(
+        actor,
+        IdentityAction.SEARCH,
+        trace_id=uuid4(),
+    )
+
+    assert scopes == (KnowledgeScopeRef(KnowledgeScope.TENANT, "tenant-a"),)
+    assert actor.can_read(KnowledgeScope.TENANT, "tenant-b") is False
+    with pytest.raises(IdentityDenied):
+        await access.authorize(
+            actor,
+            IdentityAction.SEARCH,
+            IdentityResource(
+                resource_type="knowledge_scope",
+                resource_id="tenant-b",
+                scope=KnowledgeScope.TENANT,
+                scope_id="tenant-b",
+            ),
+            trace_id=uuid4(),
+        )
+
+
+@pytest.mark.asyncio
 async def test_revoked_membership_stops_access_and_records_nonleaking_denial() -> None:
     access, directory, audit = _access(_membership(IdentityRole.INTERNAL_EMPLOYEE))
     actor = await access.authenticate("valid", trace_id=uuid4())

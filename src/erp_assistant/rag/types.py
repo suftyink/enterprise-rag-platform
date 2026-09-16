@@ -10,6 +10,7 @@ class DataClassification(StrEnum):
 class KnowledgeScope(StrEnum):
     TENANT = "TENANT"
     GLOBAL = "GLOBAL"
+    SHARED = "SHARED"
 
 
 class DocumentStatus(StrEnum):
