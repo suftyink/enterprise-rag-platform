@@ -198,6 +198,7 @@ class AnswerQualityReport:
     dataset_hash: str
     metrics: AnswerQualityMetrics
     gate: AnswerQualityGate
+    route_fingerprints: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -264,6 +265,7 @@ class EvaluationReport:
                 {
                     "datasetVersion": self.answer_quality.dataset_version,
                     "datasetHash": self.answer_quality.dataset_hash,
+                    "routeFingerprints": list(self.answer_quality.route_fingerprints),
                     "metrics": {
                         "caseCount": self.answer_quality.metrics.case_count,
                         "citationSupportRate": (self.answer_quality.metrics.citation_support_rate),

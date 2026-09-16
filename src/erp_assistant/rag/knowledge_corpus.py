@@ -13,6 +13,7 @@ from erp_assistant.models.knowledge import (
     KnowledgeIndexJob,
     KnowledgeLifecycleEvent,
 )
+from erp_assistant.operations.contracts import NullTelemetry, Telemetry
 from erp_assistant.rag._knowledge_lifecycle import apply_transition
 from erp_assistant.rag.corpus_generation import lock_corpus_generation
 from erp_assistant.rag.document_indexer import IndexDecision
@@ -49,10 +50,12 @@ class KnowledgeCorpus:
         session_factory: async_sessionmaker[AsyncSession],
         processor: CorpusProcessor,
         authorizer: CorpusAuthorizer,
+        telemetry: Telemetry | None = None,
     ) -> None:
         self._sessions = session_factory
         self._processor = processor
         self._authorizer = authorizer
+        self._telemetry = telemetry or NullTelemetry()
 
     async def submit(
         self,
@@ -80,7 +83,7 @@ class KnowledgeCorpus:
                     "已发布文档必须创建新版本后再提交处理",
                 )
 
-        outcome = await self._processor.index(document_id)
+        outcome = await self._processor.index(document_id, trace_id=operation_trace)
         async with self._sessions() as session:
             document = await session.get(KnowledgeDocument, document_id)
             if document is None:
@@ -137,6 +140,12 @@ class KnowledgeCorpus:
                 )
             )
             await session.commit()
+        self._emit_lifecycle(
+            operation_trace,
+            "SUBMIT",
+            outcome.decision.value,
+            document.version,
+        )
         return await self.inspect(document_id, actor, trace_id=operation_trace)
 
     async def inspect(
@@ -183,6 +192,13 @@ class KnowledgeCorpus:
         try:
             await self._transition(document_id, action, actor, reason, expected_revision)
         except CorpusError as exc:
+            self._telemetry.emit(
+                trace_id=operation_trace,
+                signal="lifecycle_transition",
+                stage="lifecycle",
+                outcome="FAILED",
+                attributes={"decision": action.value, "reason_code": exc.code},
+            )
             await self._record_failed_transition(
                 document_id,
                 action,
@@ -191,7 +207,27 @@ class KnowledgeCorpus:
                 exc.code,
             )
             raise
+        self._emit_lifecycle(operation_trace, action.value, "SUCCEEDED", document.version)
         return await self.inspect(document_id, actor, trace_id=operation_trace)
+
+    def _emit_lifecycle(
+        self,
+        trace_id: UUID,
+        action: str,
+        result: str,
+        document_version: int,
+    ) -> None:
+        self._telemetry.emit(
+            trace_id=trace_id,
+            signal="lifecycle_transition",
+            stage="lifecycle",
+            outcome="FAILED" if result.endswith("FAILED") else "SUCCEEDED",
+            attributes={
+                "decision": action,
+                "reason_code": result,
+                "document_version": document_version,
+            },
+        )
 
     async def _transition(
         self,

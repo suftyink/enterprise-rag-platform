@@ -65,3 +65,17 @@ def embedding_binding_fingerprint(provider: EmbeddingProvider) -> str:
         sort_keys=True,
     ).encode("utf-8")
     return sha256(payload).hexdigest()
+
+
+def chat_binding_fingerprint(provider: ChatProvider, *, classification: str) -> str:
+    payload = json.dumps(
+        {
+            "boundary": str(getattr(provider, "boundary", ProviderBoundary.INTERNAL)),
+            "classification": classification,
+            "deployment": str(getattr(provider, "deployment", "legacy")),
+            "model": str(getattr(provider, "model", "unknown")),
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return sha256(payload).hexdigest()

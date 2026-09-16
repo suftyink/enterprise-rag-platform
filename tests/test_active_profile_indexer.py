@@ -42,7 +42,10 @@ class RecordingIndexer:
             revision=f"pipeline-{binding.name}",
         )
 
-    async def index(self, document_id: UUID) -> DocumentIndexOutcome:
+    async def index(
+        self, document_id: UUID, *, trace_id: UUID | None = None
+    ) -> DocumentIndexOutcome:
+        del trace_id
         self._calls.append(self._binding.name)
         return DocumentIndexOutcome(
             document_id=document_id,

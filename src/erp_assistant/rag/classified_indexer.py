@@ -30,7 +30,9 @@ class ClassifiedDocumentIndexer:
         self._sessions = session_factory
         self._routes = dict(routes)
 
-    async def index(self, document_id: UUID) -> DocumentIndexOutcome:
+    async def index(
+        self, document_id: UUID, *, trace_id: UUID | None = None
+    ) -> DocumentIndexOutcome:
         async with self._sessions() as session:
             document = await session.get(KnowledgeDocument, document_id)
         if document is None:
@@ -56,7 +58,7 @@ class ClassifiedDocumentIndexer:
                 else "INDEX_ROUTE_UNAVAILABLE"
             )
             raise RagDependencyError(code, "索引路由配置不完整") from exc
-        return await indexer.index(document_id)
+        return await indexer.index(document_id, trace_id=trace_id)
 
 
 class ActiveProfileDocumentIndexer:
@@ -72,7 +74,9 @@ class ActiveProfileDocumentIndexer:
         self._registry = registry
         self._indexer_factory = indexer_factory
 
-    async def index(self, document_id: UUID) -> DocumentIndexOutcome:
+    async def index(
+        self, document_id: UUID, *, trace_id: UUID | None = None
+    ) -> DocumentIndexOutcome:
         async with self._sessions() as session:
             document = await session.get(KnowledgeDocument, document_id)
             if document is None:
@@ -90,7 +94,7 @@ class ActiveProfileDocumentIndexer:
                 "没有可用于增量索引的活动检索 Profile",
             )
         binding = self._registry.binding_for(profile)
-        outcome = await self._indexer_factory(binding).index(document_id)
+        outcome = await self._indexer_factory(binding).index(document_id, trace_id=trace_id)
         async with self._sessions() as session:
             active_profile_id = await session.scalar(
                 select(RetrievalProfileRecord.id).where(

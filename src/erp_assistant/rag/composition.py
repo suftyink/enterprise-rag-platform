@@ -6,6 +6,7 @@ from erp_assistant.identity.audit import SessionSecurityAuditSink
 from erp_assistant.identity.composition import identity_components
 from erp_assistant.infrastructure.database import SessionFactory
 from erp_assistant.infrastructure.object_storage import get_object_storage
+from erp_assistant.operations.telemetry import get_telemetry
 from erp_assistant.orchestration.provider_factory import get_embedding_provider_for
 from erp_assistant.rag.classified_indexer import (
     ActiveProfileDocumentIndexer,
@@ -33,6 +34,7 @@ def get_document_indexer_for(classification: DataClassification) -> DocumentInde
         embedding=get_embedding_provider_for(classification),
         vector_writer=get_vector_store_for(classification),
         settings=get_settings(),
+        telemetry=get_telemetry(),
     )
 
 
@@ -44,6 +46,7 @@ def _get_profile_document_indexer(binding: RetrievalRuntimeBinding) -> DocumentI
         embedding=binding.embedding,
         vector_writer=binding.vector_store,
         settings=binding.settings,
+        telemetry=get_telemetry(),
     )
     if (
         indexer.pipeline.parser != binding.parser_version
@@ -83,8 +86,10 @@ def get_knowledge_corpus() -> KnowledgeCorpus:
                 verifier=verifier,
                 directory=directory,
                 audit=SessionSecurityAuditSink(SessionFactory),
+                telemetry=get_telemetry(),
             )
         ),
+        telemetry=get_telemetry(),
     )
 
 

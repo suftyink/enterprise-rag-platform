@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from erp_assistant.core.config import Settings
 from erp_assistant.identity import IdentityAccess
 from erp_assistant.models.knowledge import RetrievalProfileRecord
+from erp_assistant.operations.contracts import NullTelemetry, Telemetry
 from erp_assistant.rag.errors import RagDependencyError
 from erp_assistant.rag.retriever import KnowledgeRetriever, RetrievalOutcome, RetrievalRequest
 from erp_assistant.rag.runtime_registry import RetrievalRuntimeRegistry
@@ -19,12 +20,14 @@ class ProfileBoundRetriever:
         settings: Settings,
         *,
         identity_access: IdentityAccess,
+        telemetry: Telemetry | None = None,
         runtime_registry: RetrievalRuntimeRegistry | None = None,
     ) -> None:
         self._session = session
         self._retriever = retriever
         self._runtime_registry = runtime_registry
         self._identity = identity_access
+        self._telemetry = telemetry or NullTelemetry()
         self._enforce_binding = settings.app_env.casefold() == "production"
 
     async def retrieve(self, request: RetrievalRequest) -> RetrievalOutcome:
@@ -39,7 +42,12 @@ class ProfileBoundRetriever:
         if active is None:
             raise RagDependencyError("ACTIVE_PROFILE_UNAVAILABLE", "没有已激活的检索 Profile")
         if self._runtime_registry is not None:
-            retriever = self._runtime_registry.resolve(active, self._session, self._identity)
+            retriever = self._runtime_registry.resolve(
+                active,
+                self._session,
+                self._identity,
+                self._telemetry,
+            )
             return await retriever.retrieve(request)
         if (
             not active.production_ready

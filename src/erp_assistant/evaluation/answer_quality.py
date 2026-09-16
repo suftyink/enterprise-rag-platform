@@ -42,9 +42,11 @@ class AnswerQualityEvaluator:
         assistant: Assistant,
         *,
         thresholds: AnswerQualityThresholds | None = None,
+        route_fingerprints: frozenset[str] = frozenset(),
     ) -> None:
         self._assistant = assistant
         self._thresholds = thresholds or AnswerQualityThresholds()
+        self._route_fingerprints = route_fingerprints
 
     async def run(self, dataset: EvaluationDataset) -> AnswerQualityReport:
         expected_answers = 0
@@ -92,6 +94,7 @@ class AnswerQualityEvaluator:
                 answer_refusal_accuracy=refusal_accuracy,
             ),
             gate=AnswerQualityGate(decision=decision, reasons=tuple(reasons)),
+            route_fingerprints=tuple(sorted(self._route_fingerprints)),
         )
 
     @staticmethod

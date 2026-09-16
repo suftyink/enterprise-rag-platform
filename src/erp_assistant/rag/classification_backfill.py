@@ -128,7 +128,7 @@ async def backfill_document_classifications(
     dispatch_failed = False
     for document_id, job_id in pending_jobs:
         try:
-            task_id = dispatch(document_id)
+            task_id = dispatch(document_id, uuid4())
         except Exception as exc:
             dispatch_failed = True
             async with session_factory() as session:

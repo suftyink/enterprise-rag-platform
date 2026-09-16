@@ -17,6 +17,7 @@ from erp_assistant.identity import (
 )
 from erp_assistant.infrastructure.database import Base
 from erp_assistant.models.knowledge import KnowledgeChunk, KnowledgeDocument
+from erp_assistant.operations.telemetry import OperationalTelemetry, RecordingTelemetryExporter
 from erp_assistant.orchestration.fake_providers import (
     FakeEmbeddingProvider,
     FakeRerankProvider,
@@ -152,6 +153,48 @@ async def test_retrieve_returns_typed_evidence_for_a_permitted_document(
     assert outcome.run.retrieval == "dense-bm25-rrf-v1"
     assert outcome.run.embedding_model == "fake-lexical-v1"
     assert outcome.run.rerank_model == "fake-lexical-rerank-v2"
+
+
+@pytest.mark.asyncio
+async def test_retrieve_emits_safe_stage_telemetry_with_one_trace(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    document = _ready_document("TENANT", "tenant-a", "trace-policy")
+    chunk = _chunk(document, "Trace propagation is required for retrieval stages.")
+    vector_store = RecordingVectorStore(hits=[VectorHit(chunk_id=chunk.id, score=0.9)])
+    exporter = RecordingTelemetryExporter()
+    telemetry = OperationalTelemetry((exporter,))
+    trace_id = uuid4()
+    async with session_factory() as session:
+        session.add_all([document, chunk])
+        await session.commit()
+        retriever = KnowledgeRetriever(
+            session=session,
+            vector_store=vector_store,
+            embedding=FakeEmbeddingProvider(),
+            reranker=FakeRerankProvider(),
+            settings=Settings(rag_enabled=True),
+            telemetry=telemetry,
+        )
+
+        await retriever.retrieve(
+            RetrievalRequest(
+                query="trace propagation",
+                actor=ActorContext(subject_id="trace-user", tenant_id="tenant-a"),
+                trace_id=trace_id,
+            )
+        )
+
+    assert {event.signal for event in exporter.events} == {
+        "embedding",
+        "recall",
+        "filtering",
+        "rerank",
+        "retrieval",
+        "retrieval_gate",
+    }
+    assert all(event.trace_id == trace_id for event in exporter.events)
+    assert all("content" not in dict(event.attributes) for event in exporter.events)
 
 
 @pytest.mark.asyncio

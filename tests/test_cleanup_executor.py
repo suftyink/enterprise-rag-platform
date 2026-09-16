@@ -36,7 +36,10 @@ def KnowledgeCorpus(**kwargs: object):  # type: ignore[no-redef]
 
 
 class UnusedProcessor:
-    async def index(self, document_id: UUID) -> DocumentIndexOutcome:
+    async def index(
+        self, document_id: UUID, *, trace_id: UUID | None = None
+    ) -> DocumentIndexOutcome:
+        del trace_id
         del document_id
         raise AssertionError("cleanup must not invoke document processing")
 

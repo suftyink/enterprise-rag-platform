@@ -27,7 +27,9 @@ CorpusActor = ActorContext
 
 
 class CorpusProcessor(Protocol):
-    async def index(self, document_id: UUID) -> DocumentIndexOutcome: ...
+    async def index(
+        self, document_id: UUID, *, trace_id: UUID | None = None
+    ) -> DocumentIndexOutcome: ...
 
 
 class CorpusAuthorizer(Protocol):

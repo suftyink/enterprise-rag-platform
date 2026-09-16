@@ -82,6 +82,12 @@ Windows 开发环境启动 Worker：
 uv run python -m celery -A erp_assistant.workers.celery_app:celery_app worker --loglevel=INFO --pool=solo --without-gossip --without-mingle --without-heartbeat
 ```
 
+另开进程启动 Beat，以每分钟采集索引队列深度、重试、失败和卡住任务：
+
+```powershell
+uv run python -m celery -A erp_assistant.workers.celery_app:celery_app beat --loglevel=INFO
+```
+
 ## 接口
 
 - `GET /health/live`：进程存活检查。
@@ -110,6 +116,7 @@ uv run python -m celery -A erp_assistant.workers.celery_app:celery_app worker --
 
 ```dotenv
 RAG_ENABLED=true
+PILOT_RELEASE_FINGERPRINT=<PilotReadiness ReleaseIdentity fingerprint>
 ```
 
 启动完整基础设施、升级数据库，并分别启动 API 和 Worker：
@@ -177,6 +184,14 @@ uv run python -m erp_assistant.evaluation.retrieval `
 ```
 
 仓库内示例集是合成契约夹具，只能验证评测框架；生产基线必须包含至少 100 条由业务方人工复核、覆盖全部必需分类的真实案例。
+
+生产试点发布前，使用统一门禁采集当前数据库迁移、PostgreSQL、Redis、MinIO、Milvus、Celery、模型路由和最近 24 小时运行遥测，并合并已批准评测、容量、安全、基础设施与恢复演练证据：
+
+```powershell
+uv run python -m erp_assistant.operations.release_check pilot-release-manifest.json
+```
+
+Manifest 的 `release` 固定数据集、索引构建、解析/切分版本、配置及检索/回答路由指纹；`evaluationReport` 指向同目录下的评测报告；`security`、`infrastructure`、`capacity` 和 `recovery` 提供现场运行产生的时间、原始 `identityFingerprint`、无敏感信息证据引用和指标。命令只在 `APP_ENV=production` 下运行，`PILOT_RELEASE_FINGERPRINT`、活动 Profile/索引构建和每份现场证据的指纹必须等于 `release` 计算出的 SHA-256 指纹；仅 `PASS` 返回退出码 0，其他结果返回 2，并将完整报告追加写入数据库且不可覆盖。
 
 当前限制为单文件 20MB、最多 200 页，仅支持可复制文字的 PDF。扫描件会进入 `OCR_REQUIRED`，不会生成错误索引。Fake Embedding 只用于验证流程和基础词项检索，不能代表真实语义准确率。
 

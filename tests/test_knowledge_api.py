@@ -106,7 +106,7 @@ async def knowledge_api() -> AsyncIterator[KnowledgeApiContext]:
     app.dependency_overrides[get_object_storage] = lambda: storage
     app.dependency_overrides[get_vector_store] = lambda: vector_store
     app.dependency_overrides[get_document_dispatcher] = lambda: (
-        lambda document_id: f"task-{document_id}"
+        lambda document_id, trace_id: f"task-{document_id}-{trace_id}"
     )
     app.dependency_overrides[get_current_actor] = lambda: actor
     app.dependency_overrides[get_identity_access] = lambda: identity_access
@@ -189,6 +189,38 @@ async def test_upload_status_and_hash_deduplication(
         params={"tenantId": "tenant-b", "operatorId": "user-b"},
     )
     assert hidden.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_upload_propagates_http_trace_to_the_index_task(
+    knowledge_api: KnowledgeApiContext,
+) -> None:
+    client, _, _, _ = knowledge_api
+    trace_id = uuid4()
+    dispatched: list[tuple[UUID, UUID]] = []
+
+    def dispatch(document_id: UUID, operation_trace_id: UUID) -> str:
+        dispatched.append((document_id, operation_trace_id))
+        return f"task-{document_id}"
+
+    app.dependency_overrides[get_document_dispatcher] = lambda: dispatch
+
+    response = await client.post(
+        "/api/assistant/v1/knowledge/documents",
+        headers={"X-Request-ID": str(trace_id)},
+        files={
+            "file": (
+                "trace.pdf",
+                make_pdf(["Trace propagation policy contains enough searchable text. " * 4]),
+                "application/pdf",
+            )
+        },
+        data={"documentKey": "trace-policy"},
+    )
+
+    assert response.status_code == 202
+    assert response.headers["X-Trace-ID"] == str(trace_id)
+    assert dispatched == [(UUID(response.json()["documentId"]), trace_id)]
 
 
 @pytest.mark.asyncio

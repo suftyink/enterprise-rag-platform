@@ -1,6 +1,7 @@
 import json
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
+from time import perf_counter
 from typing import Protocol
 from uuid import UUID, uuid4
 
@@ -15,6 +16,7 @@ from erp_assistant.identity import (
 )
 from erp_assistant.models.answer import KnowledgeAnswerFeedback, KnowledgeAnswerRun
 from erp_assistant.models.knowledge import KnowledgeDocument
+from erp_assistant.operations.contracts import NullTelemetry, Telemetry
 from erp_assistant.orchestration.providers import (
     ChatMessage,
     ChatProvider,
@@ -53,6 +55,7 @@ class AnswerRequest:
     actor: ActorContext
     evidence_limit: int = 5
     data_classification: DataClassification = DataClassification.ORDINARY
+    trace_id: UUID = field(default_factory=uuid4)
 
 
 @dataclass(frozen=True)
@@ -127,6 +130,7 @@ class KnowledgeAssistant:
         chat_routes: dict[DataClassification, ChatProvider],
         session_factory: async_sessionmaker[AsyncSession],
         identity_access: IdentityAccess,
+        telemetry: Telemetry | None = None,
         context_token_budget: int = 4_096,
     ) -> None:
         if context_token_budget < 64:
@@ -136,12 +140,13 @@ class KnowledgeAssistant:
         self._sessions = session_factory
         self._feedback = AnswerFeedbackStore(session_factory)
         self._identity = identity_access
+        self._telemetry = telemetry or NullTelemetry()
         self._context_token_budget = context_token_budget
 
     async def ask(self, request: AnswerRequest) -> AnswerOutcome:
         if not request.actor.is_trusted:
             raise RagError("UNTRUSTED_ACTOR", "回答请求缺少可信身份")
-        trace_id = uuid4()
+        trace_id = request.trace_id
         authorized_scopes = await self._authorize(
             request.actor, IdentityAction.ANSWER, trace_id
         )
@@ -224,9 +229,17 @@ class KnowledgeAssistant:
                     reason="RESTRICTED_ROUTE_FORBIDDEN",
                 ),
             )
+        model_started = perf_counter()
         try:
             result = await provider.generate(self._messages(request.question, evidence_by_id))
         except (ConnectionError, RagDependencyError, TimeoutError):
+            self._telemetry.emit(
+                trace_id=trace_id,
+                signal="model_generation",
+                stage="model_generation",
+                outcome="FAILED",
+                attributes={"error_code": "CHAT_PROVIDER_UNAVAILABLE"},
+            )
             return await self._finish(
                 request,
                 AnswerOutcome(
@@ -237,6 +250,16 @@ class KnowledgeAssistant:
                     reason="CHAT_PROVIDER_UNAVAILABLE",
                 ),
             )
+        self._telemetry.emit(
+            trace_id=trace_id,
+            signal="model_generation",
+            stage="model_generation",
+            outcome="SUCCEEDED",
+            attributes={
+                "duration_ms": round((perf_counter() - model_started) * 1_000, 2),
+                "model": result.model,
+            },
+        )
         authorized_scopes = await self._authorize(
             request.actor, IdentityAction.ANSWER, trace_id
         )
@@ -382,6 +405,17 @@ class KnowledgeAssistant:
                     )
                 )
             await session.commit()
+        self._telemetry.emit(
+            trace_id=outcome.trace_id,
+            signal="answer",
+            stage="answer",
+            outcome="SUCCEEDED" if outcome.decision is not AnswerDecision.ERROR else "FAILED",
+            attributes={
+                "decision": outcome.decision.value,
+                "reason_code": outcome.reason or "NONE",
+                **({"model": outcome.model} if outcome.model is not None else {}),
+            },
+        )
         return outcome
 
     @staticmethod

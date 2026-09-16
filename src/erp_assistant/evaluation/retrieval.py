@@ -45,6 +45,7 @@ from erp_assistant.orchestration.provider_factory import (
     get_embedding_provider_for,
     get_rerank_provider_for,
 )
+from erp_assistant.orchestration.providers import chat_binding_fingerprint
 from erp_assistant.rag.classified_retriever import ClassifiedRetrieverRouter
 from erp_assistant.rag.errors import RagDependencyError, RagError
 from erp_assistant.rag.knowledge_assistant import KnowledgeAssistant
@@ -444,19 +445,29 @@ async def evaluate_candidate_profile(
             SessionFactory,
             runtime_binding_validator=registry.can_resolve,
         )
+        chat_provider = get_chat_provider_for(classification)
         assistant = KnowledgeAssistant(
             retriever=retriever,
-            chat_routes={classification: get_chat_provider_for(classification)},
+            chat_routes={classification: chat_provider},
             session_factory=SessionFactory,
             identity_access=identity_access,
             context_token_budget=get_settings().answer_context_token_budget,
+        )
+        answer_route_fingerprint = chat_binding_fingerprint(
+            chat_provider,
+            classification=classification.value,
         )
         return await RetrievalEvaluator(
             retriever,
             environment,
             activator=activator,
             candidate_profile_id=profile_id,
-            answer_evaluator=AnswerQualityEvaluator(assistant),
+            answer_evaluator=AnswerQualityEvaluator(
+                assistant,
+                route_fingerprints=frozenset(
+                    {f"{classification.value}:{answer_route_fingerprint}"}
+                ),
+            ),
         ).run(dataset)
 
 

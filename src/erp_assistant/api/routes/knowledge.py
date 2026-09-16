@@ -23,6 +23,7 @@ from erp_assistant.api.dependencies import (
     get_current_actor,
     get_identity_access,
     get_knowledge_retriever,
+    request_trace_id,
 )
 from erp_assistant.api.knowledge_access import authorize_or_not_found, knowledge_resource
 from erp_assistant.api.knowledge_schemas import (
@@ -233,6 +234,7 @@ async def upload_document(
             original_filename=filename,
             media_type=media_type,
             data_classification=_classify_document(content, key, settings),
+            trace_id=request_trace_id(request),
         )
     except RagDependencyError as exc:
         raise _error(status.HTTP_503_SERVICE_UNAVAILABLE, exc.code, exc.message) from exc
@@ -294,7 +296,12 @@ async def retry_failed_document(
     if document.status == DocumentStatus.OCR_REQUIRED.value:
         raise _error(status.HTTP_409_CONFLICT, "OCR_NOT_AVAILABLE", "当前阶段尚未支持 OCR")
     try:
-        job = await retry_document(session, dispatch, document)
+        job = await retry_document(
+            session,
+            dispatch,
+            document,
+            trace_id=request_trace_id(request),
+        )
     except RagDependencyError as exc:
         raise _error(status.HTTP_503_SERVICE_UNAVAILABLE, exc.code, exc.message) from exc
     except RagError as exc:
@@ -327,6 +334,7 @@ async def search_documents(
                 query=payload.query,
                 actor=actor,
                 evidence_limit=payload.top_k,
+                trace_id=request_trace_id(request),
             )
         )
     except RagDependencyError as exc:

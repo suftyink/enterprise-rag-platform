@@ -20,6 +20,7 @@ from erp_assistant.identity import (
     KnowledgeScopeRef,
 )
 from erp_assistant.models.knowledge import KnowledgeChunk, KnowledgeDocument
+from erp_assistant.operations.contracts import NullTelemetry, Telemetry
 from erp_assistant.orchestration.providers import (
     EmbeddingProvider,
     ProviderBoundary,
@@ -152,6 +153,7 @@ class KnowledgeRetriever:
         reranker: RerankProvider,
         settings: Settings,
         identity_access: IdentityAccess,
+        telemetry: Telemetry | None = None,
     ) -> None:
         self._session = session
         self._vector_store = vector_store
@@ -159,6 +161,7 @@ class KnowledgeRetriever:
         self._reranker = reranker
         self._settings = settings
         self._identity = identity_access
+        self._telemetry = telemetry or NullTelemetry()
 
     async def retrieve(self, request: RetrievalRequest) -> RetrievalOutcome:
         request = self._normalize_request(request)
@@ -184,7 +187,7 @@ class KnowledgeRetriever:
         started = perf_counter()
         evidence = await self._retrieve_evidence(request, authorized_scopes)
         await self._authorize(request)
-        return RetrievalOutcome(
+        outcome = RetrievalOutcome(
             decision=(
                 SearchDecision.MATCHED if evidence else SearchDecision.INSUFFICIENT_KNOWLEDGE
             ),
@@ -210,6 +213,29 @@ class KnowledgeRetriever:
                 retrieval_config=self.retrieval_config(),
             ),
         )
+        self._telemetry.emit(
+            trace_id=request.trace_id,
+            signal="retrieval",
+            stage="retrieval",
+            outcome="SUCCEEDED",
+            attributes={
+                "duration_ms": outcome.run.elapsed_ms,
+                "candidate_count": len(outcome.evidence),
+                "decision": outcome.decision.value,
+                "index_identity": self.index_identity,
+            },
+        )
+        self._telemetry.emit(
+            trace_id=request.trace_id,
+            signal="retrieval_gate",
+            stage="retrieval_gate",
+            outcome="SUCCEEDED",
+            attributes={
+                "candidate_count": len(outcome.evidence),
+                "decision": outcome.decision.value,
+            },
+        )
+        return outcome
 
     async def _retrieve_evidence(
         self,
@@ -224,12 +250,26 @@ class KnowledgeRetriever:
         if self._settings.app_env.casefold() != "production":
             index_filter = or_(index_filter, KnowledgeChunk.index_identity == "legacy")
         scope_filter = authorized_scope_filter(authorized_scopes)
+        embedding_started = perf_counter()
         try:
             vector = (await self._embedding.embed([request.query]))[0]
         except RagDependencyError:
+            self._emit_failure(request, "embedding", "EMBEDDING_FAILED")
             raise
         except Exception as exc:
+            self._emit_failure(request, "embedding", "EMBEDDING_FAILED")
             raise RagDependencyError("EMBEDDING_FAILED", "查询向量生成失败") from exc
+        self._telemetry.emit(
+            trace_id=request.trace_id,
+            signal="embedding",
+            stage="embedding",
+            outcome="SUCCEEDED",
+            attributes={
+                "duration_ms": round((perf_counter() - embedding_started) * 1_000, 2),
+                "model": self._embedding.model,
+            },
+        )
+        recall_started = perf_counter()
         try:
             hits = await asyncio.to_thread(
                 self._vector_store.search,
@@ -240,10 +280,24 @@ class KnowledgeRetriever:
                 self._settings.rag_rrf_k,
             )
         except RagDependencyError:
+            self._emit_failure(request, "recall", "MILVUS_SEARCH_FAILED")
             raise
         except Exception as exc:
+            self._emit_failure(request, "recall", "MILVUS_SEARCH_FAILED")
             raise RagDependencyError("MILVUS_SEARCH_FAILED", "Milvus 检索失败") from exc
+        self._telemetry.emit(
+            trace_id=request.trace_id,
+            signal="recall",
+            stage="recall",
+            outcome="SUCCEEDED",
+            attributes={
+                "duration_ms": round((perf_counter() - recall_started) * 1_000, 2),
+                "candidate_count": len(hits),
+                "index_identity": self.index_identity,
+            },
+        )
         if not hits:
+            self._emit_count(request, "filtering", 0)
             return ()
 
         try:
@@ -265,6 +319,7 @@ class KnowledgeRetriever:
                 )
             ).all()
         except Exception as exc:
+            self._emit_failure(request, "filtering", "DATABASE_SEARCH_FAILED")
             raise RagDependencyError("DATABASE_SEARCH_FAILED", "知识元数据查询失败") from exc
 
         by_id = {chunk.id: (chunk, document) for chunk, document in rows}
@@ -273,18 +328,33 @@ class KnowledgeRetriever:
             row = by_id.get(hit.chunk_id)
             if row is not None:
                 candidates.append((*row, retrieval_rank, hit.score))
+        self._emit_count(request, "filtering", len(candidates))
         if not candidates:
             return ()
 
+        rerank_started = perf_counter()
         try:
             ranked = await self._reranker.rerank(
                 request.query,
                 [chunk.content for chunk, _, _, _ in candidates],
             )
         except RagDependencyError:
+            self._emit_failure(request, "rerank", "RERANK_FAILED")
             raise
         except Exception as exc:
+            self._emit_failure(request, "rerank", "RERANK_FAILED")
             raise RagDependencyError("RERANK_FAILED", "候选结果重排失败") from exc
+        self._telemetry.emit(
+            trace_id=request.trace_id,
+            signal="rerank",
+            stage="rerank",
+            outcome="SUCCEEDED",
+            attributes={
+                "duration_ms": round((perf_counter() - rerank_started) * 1_000, 2),
+                "candidate_count": len(ranked),
+                "model": self._reranker.model,
+            },
+        )
 
         scored_evidence: list[tuple[RetrievalEvidence, float]] = []
         seen_indexes: set[int] = set()
@@ -327,6 +397,24 @@ class KnowledgeRetriever:
             raise RagDependencyError("RERANK_INVALID_RESPONSE", "候选结果重排响应无效")
         scored_evidence.sort(key=lambda item: (-item[0].score, -item[1], str(item[0].chunk_id)))
         return tuple(item[0] for item in scored_evidence[: request.evidence_limit])
+
+    def _emit_count(self, request: RetrievalRequest, signal: str, count: int) -> None:
+        self._telemetry.emit(
+            trace_id=request.trace_id,
+            signal=signal,
+            stage=signal,
+            outcome="SUCCEEDED",
+            attributes={"candidate_count": count},
+        )
+
+    def _emit_failure(self, request: RetrievalRequest, signal: str, code: str) -> None:
+        self._telemetry.emit(
+            trace_id=request.trace_id,
+            signal=signal,
+            stage=signal,
+            outcome="FAILED",
+            attributes={"error_code": code},
+        )
 
     @staticmethod
     def _normalize_request(request: RetrievalRequest) -> RetrievalRequest:

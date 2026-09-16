@@ -68,7 +68,8 @@ async def test_backfill_classifies_audits_and_dispatches_reindex_idempotently(
         await session.commit()
     dispatched: list[UUID] = []
 
-    def dispatch(document_id: UUID) -> str:
+    def dispatch(document_id: UUID, trace_id: UUID) -> str:
+        del trace_id
         dispatched.append(document_id)
         return f"task-{document_id}"
 
@@ -119,7 +120,7 @@ async def test_backfill_rejects_manifest_that_omits_unclassified_documents(
     with pytest.raises(RagError) as raised:
         await backfill_document_classifications(
             session_factory,
-            lambda document_id: str(document_id),
+            lambda document_id, trace_id: str(document_id),
             manifest={"d" * 64: DataClassification.ORDINARY},
             operator_id="security-reviewer",
         )
@@ -139,7 +140,8 @@ async def test_backfill_continues_dispatching_and_retries_only_failed_jobs(
         await session.commit()
     calls: list[UUID] = []
 
-    def flaky_dispatch(document_id: UUID) -> str:
+    def flaky_dispatch(document_id: UUID, trace_id: UUID) -> str:
+        del trace_id
         calls.append(document_id)
         if document_id == first.id:
             raise RuntimeError("queue unavailable")
@@ -161,7 +163,8 @@ async def test_backfill_continues_dispatching_and_retries_only_failed_jobs(
 
     retried: list[UUID] = []
 
-    def retry_dispatch(document_id: UUID) -> str:
+    def retry_dispatch(document_id: UUID, trace_id: UUID) -> str:
+        del trace_id
         retried.append(document_id)
         return f"retry-{document_id}"
 
@@ -203,7 +206,8 @@ async def test_backfill_recovers_committed_outbox_after_process_exit(
         await session.commit()
     dispatched: list[UUID] = []
 
-    def dispatch(document_id: UUID) -> str:
+    def dispatch(document_id: UUID, trace_id: UUID) -> str:
+        del trace_id
         dispatched.append(document_id)
         return f"task-{document_id}"
 

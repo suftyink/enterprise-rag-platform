@@ -135,6 +135,7 @@ class Settings(BaseSettings):
     oidc_jwks_max_keys: int = Field(default=32, gt=0, le=128)
     identity_memberships_json: str = "{}"
     evaluation_bearer_token: SecretStr = SecretStr("")
+    pilot_release_fingerprint: str = Field(default="", pattern=r"^(?:|[0-9a-f]{64})$")
 
     @property
     def restricted_document_keys(self) -> set[str]:

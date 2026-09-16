@@ -2,6 +2,8 @@ from uuid import uuid4
 
 import pytest
 
+import erp_assistant.workers.tasks as worker_tasks
+from erp_assistant.operations.telemetry import OperationalTelemetry, RecordingTelemetryExporter
 from erp_assistant.rag.cleanup_executor import CleanupDecision, CleanupOutcome
 from erp_assistant.rag.knowledge_corpus import (
     SYSTEM_CORPUS_ACTOR,
@@ -10,9 +12,11 @@ from erp_assistant.rag.knowledge_corpus import (
 )
 from erp_assistant.rag.types import DocumentStatus, PublicationStatus, RetentionStatus
 from erp_assistant.workers.celery_app import celery_app
+from erp_assistant.workers.dispatcher import enqueue_document
 from erp_assistant.workers.tasks import (
     _run_cleanup,
     _run_index,
+    _task_trace_id,
     cleanup_knowledge_document,
     health,
     index_document,
@@ -22,12 +26,12 @@ from erp_assistant.workers.tasks import (
 class StubCorpus:
     def __init__(self, view: CorpusDocumentView) -> None:
         self.view = view
-        self.calls: list[tuple[object, object, str]] = []
+        self.calls: list[tuple[object, object, str, object]] = []
 
     async def submit(
-        self, document_id: object, actor: object, *, reason: str
+        self, document_id: object, actor: object, *, reason: str, trace_id: object
     ) -> CorpusDocumentView:
-        self.calls.append((document_id, actor, reason))
+        self.calls.append((document_id, actor, reason, trace_id))
         return self.view
 
 
@@ -44,6 +48,11 @@ class StubCleanupExecutor:
 def test_health_task_is_registered_and_side_effect_free() -> None:
     celery_app.finalize()
     assert "erp_assistant.health" in celery_app.tasks
+    assert "erp_assistant.observe_index_queue" in celery_app.tasks
+    assert celery_app.conf.beat_schedule["observe-index-queue-every-minute"] == {
+        "task": "erp_assistant.observe_index_queue",
+        "schedule": 60.0,
+    }
     assert health.run() == {"status": "ok"}
 
 
@@ -54,9 +63,46 @@ def test_index_worker_acknowledges_only_after_persisted_outcome() -> None:
     assert cleanup_knowledge_document.reject_on_worker_lost is True
 
 
+def test_dispatch_keeps_one_argument_envelope_and_carries_trace_in_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document_id = uuid4()
+    trace_id = uuid4()
+    captured: dict[str, object] = {}
+
+    class Result:
+        id = "task-9"
+
+    class Task:
+        def apply_async(self, *, args: list[str], headers: dict[str, str]) -> Result:
+            captured.update(args=args, headers=headers)
+            return Result()
+
+    monkeypatch.setattr(worker_tasks, "index_document", Task())
+
+    task_id = enqueue_document(document_id, trace_id)
+
+    assert task_id == "task-9"
+    assert captured == {
+        "args": [str(document_id)],
+        "headers": {"trace_id": str(trace_id)},
+    }
+
+
+def test_legacy_or_invalid_trace_header_falls_back_to_a_server_trace() -> None:
+    class Request:
+        headers = {"trace_id": "not-a-uuid"}
+
+    class Task:
+        request = Request()
+
+    assert isinstance(_task_trace_id(Task()), type(uuid4()))
+
+
 @pytest.mark.asyncio
 async def test_index_worker_returns_the_corpus_outcome() -> None:
     document_id = uuid4()
+    trace_id = uuid4()
     view = CorpusDocumentView(
         document_id=document_id,
         document_key="inventory-sop",
@@ -86,12 +132,24 @@ async def test_index_worker_returns_the_corpus_outcome() -> None:
         cleanup_requests=(),
     )
     corpus = StubCorpus(view)
+    exporter = RecordingTelemetryExporter()
+    telemetry = OperationalTelemetry((exporter,))
 
-    result = await _run_index(document_id, corpus)  # type: ignore[arg-type]
+    result = await _run_index(  # type: ignore[arg-type]
+        document_id,
+        trace_id,
+        corpus,
+        telemetry,
+    )
 
-    assert corpus.calls == [(document_id, SYSTEM_CORPUS_ACTOR, "index pipeline completed")]
+    assert corpus.calls == [
+        (document_id, SYSTEM_CORPUS_ACTOR, "index pipeline completed", trace_id)
+    ]
     assert result == view.to_dict()
     assert result["publicationStatus"] == "REVIEW_PENDING"
+    assert [(event.trace_id, event.signal) for event in exporter.events] == [
+        (trace_id, "indexing")
+    ]
 
 
 @pytest.mark.asyncio

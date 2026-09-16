@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from erp_assistant.core.config import Settings
 from erp_assistant.identity import IdentityAccess
 from erp_assistant.models.knowledge import RetrievalProfileRecord
+from erp_assistant.operations.contracts import Telemetry
 from erp_assistant.orchestration.providers import (
     EmbeddingProvider,
     ProviderBoundary,
@@ -93,12 +94,10 @@ class RetrievalRuntimeBinding:
         return (
             profile.data_classification == self.data_classification.value
             and profile.provider_boundary == self.provider_boundary.value
-            and profile.embedding_deployment
-            == str(getattr(self.embedding, "deployment", "legacy"))
+            and profile.embedding_deployment == str(getattr(self.embedding, "deployment", "legacy"))
             and profile.embedding_model == self.embedding.model
             and profile.embedding_dimension == self.embedding.dimension
-            and profile.rerank_deployment
-            == str(getattr(self.reranker, "deployment", "legacy"))
+            and profile.rerank_deployment == str(getattr(self.reranker, "deployment", "legacy"))
             and profile.rerank_model == self.reranker.model
             and profile.index_identity == self.vector_store.identity
             and profile.parser_version == self.parser_version
@@ -113,6 +112,7 @@ class RetrievalRuntimeBinding:
         self,
         session: AsyncSession,
         identity_access: IdentityAccess,
+        telemetry: Telemetry | None = None,
     ) -> KnowledgeRetriever:
         return KnowledgeRetriever(
             session=session,
@@ -121,6 +121,7 @@ class RetrievalRuntimeBinding:
             reranker=self.reranker,
             settings=self.settings,
             identity_access=identity_access,
+            telemetry=telemetry,
         )
 
 
@@ -143,8 +144,9 @@ class RetrievalRuntimeRegistry:
         profile: RetrievalProfileRecord,
         session: AsyncSession,
         identity_access: IdentityAccess,
+        telemetry: Telemetry | None = None,
     ) -> KnowledgeRetriever:
-        return self.binding_for(profile).build(session, identity_access)
+        return self.binding_for(profile).build(session, identity_access, telemetry)
 
     def binding_for(self, profile: RetrievalProfileRecord) -> RetrievalRuntimeBinding:
         binding = self._bindings.get(self._profile_key(profile))
@@ -161,6 +163,15 @@ class RetrievalRuntimeRegistry:
             if binding.data_classification is classification:
                 stores.setdefault(binding.vector_store.identity, binding.vector_store)
         return tuple(stores.values())
+
+    @property
+    def bindings(self) -> tuple[RetrievalRuntimeBinding, ...]:
+        return tuple(
+            sorted(
+                self._bindings.values(),
+                key=lambda binding: binding.data_classification.value,
+            )
+        )
 
     @staticmethod
     def _profile_key(profile: RetrievalProfileRecord) -> tuple[str, str, str, str, str]:

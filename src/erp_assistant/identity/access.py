@@ -12,6 +12,7 @@ from erp_assistant.identity.models import (
     SecurityAuditEvent,
     VerifiedIdentity,
 )
+from erp_assistant.operations.contracts import NullTelemetry, Telemetry
 from erp_assistant.rag.types import KnowledgeScope
 
 
@@ -58,10 +59,12 @@ class IdentityAccess:
         verifier: IdentityVerifier,
         directory: IdentityDirectory,
         audit: SecurityAuditSink,
+        telemetry: Telemetry | None = None,
     ) -> None:
         self._verifier = verifier
         self._directory = directory
         self._audit = audit
+        self._telemetry = telemetry or NullTelemetry()
 
     async def authenticate(self, credential: str, *, trace_id: UUID) -> ActorContext:
         try:
@@ -121,6 +124,13 @@ class IdentityAccess:
                 outcome="DENIED",
                 reason_code=reason,
                 trace_id=trace_id,
+            )
+            self._telemetry.emit(
+                trace_id=trace_id,
+                signal="authorization_denial",
+                stage="authorization",
+                outcome="DENIED",
+                attributes={"reason_code": reason},
             )
             raise IdentityDenied("RESOURCE_NOT_FOUND", "资源不存在")
         await self._record(

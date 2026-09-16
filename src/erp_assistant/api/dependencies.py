@@ -9,6 +9,7 @@ from erp_assistant.identity import ActorContext, IdentityAccess, IdentityDenied
 from erp_assistant.identity.audit import SqlSecurityAuditSink
 from erp_assistant.identity.composition import identity_components
 from erp_assistant.infrastructure.database import SessionFactory, get_session
+from erp_assistant.operations.telemetry import get_telemetry
 from erp_assistant.orchestration.provider_factory import (
     get_chat_provider_for,
     get_embedding_provider,
@@ -24,7 +25,9 @@ from erp_assistant.rag.vector_store import VectorStore, get_vector_store
 
 
 def request_trace_id(request: Request) -> UUID:
-    existing = getattr(request.state, "identity_trace_id", None)
+    existing = getattr(request.state, "trace_id", None)
+    if not isinstance(existing, UUID):
+        existing = getattr(request.state, "identity_trace_id", None)
     if isinstance(existing, UUID):
         return existing
     supplied = request.headers.get("X-Request-ID", "")
@@ -33,6 +36,7 @@ def request_trace_id(request: Request) -> UUID:
     except ValueError:
         trace_id = uuid4()
     request.state.identity_trace_id = trace_id
+    request.state.trace_id = trace_id
     return trace_id
 
 
@@ -51,6 +55,7 @@ def get_identity_access(
         verifier=verifier,
         directory=directory,
         audit=SqlSecurityAuditSink(session),
+        telemetry=get_telemetry(),
     )
 
 
@@ -92,12 +97,14 @@ def get_knowledge_retriever(
         reranker=reranker,
         settings=settings,
         identity_access=identity_access,
+        telemetry=get_telemetry(),
     )
     return ProfileBoundRetriever(
         session,
         retriever,
         settings,
         identity_access=identity_access,
+        telemetry=get_telemetry(),
         runtime_registry=(
             get_retrieval_runtime_registry() if settings.retrieval_runtime_deployments else None
         ),
@@ -117,5 +124,6 @@ def get_knowledge_assistant(
         },
         session_factory=SessionFactory,
         identity_access=identity_access,
+        telemetry=get_telemetry(),
         context_token_budget=settings.answer_context_token_budget,
     )

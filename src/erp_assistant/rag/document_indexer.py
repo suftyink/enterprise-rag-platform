@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from hashlib import sha256
+from time import perf_counter
 from typing import Any, Protocol, cast
 from uuid import UUID, uuid4, uuid5
 
@@ -20,6 +21,7 @@ from erp_assistant.models.knowledge import (
     KnowledgeIndexJob,
     KnowledgeVectorArtifact,
 )
+from erp_assistant.operations.contracts import NullTelemetry, Telemetry
 from erp_assistant.orchestration.providers import (
     EmbeddingProvider,
     ProviderBoundary,
@@ -131,6 +133,7 @@ class DocumentIndexer:
         embedding: EmbeddingProvider,
         vector_writer: VectorWriter,
         settings: Settings,
+        telemetry: Telemetry | None = None,
     ) -> None:
         self._sessions = session_factory
         self._storage = storage
@@ -140,9 +143,14 @@ class DocumentIndexer:
         self._embedding = embedding
         self._vectors = vector_writer
         self._settings = settings
+        self._telemetry = telemetry or NullTelemetry()
         self.pipeline = self._pipeline_identity()
 
-    async def index(self, document_id: UUID) -> DocumentIndexOutcome:
+    async def index(
+        self, document_id: UUID, *, trace_id: UUID | None = None
+    ) -> DocumentIndexOutcome:
+        operation_trace = trace_id or uuid4()
+        indexing_started = perf_counter()
         async with self._sessions() as session:
             try:
                 document = await session.get(KnowledgeDocument, document_id)
@@ -298,11 +306,24 @@ class DocumentIndexer:
                 failure_code = "BLOB_READ_FAILED"
                 content = await asyncio.to_thread(self._storage.get_bytes, document.object_key)
                 failure_code = "PARSER_FAILED"
+                parsing_started = perf_counter()
                 parsed = await asyncio.to_thread(
                     self._parser.parse,
                     document.media_type,
                     content,
                     self._parser_limits(),
+                )
+                self._telemetry.emit(
+                    trace_id=operation_trace,
+                    signal="parsing",
+                    stage="parsing",
+                    outcome="SUCCEEDED",
+                    attributes={
+                        "duration_ms": round((perf_counter() - parsing_started) * 1_000, 2),
+                        "chunk_count": len(parsed.blocks),
+                        "parser_version": parsed.parser_version,
+                        "document_version": document.version,
+                    },
                 )
                 parsed_key = document.object_key.rsplit("/", 1)[0] + "/parsed/document.json"
                 parsed_content = json.dumps(
@@ -455,13 +476,28 @@ class DocumentIndexer:
                 await self._commit_claimed(session, job_id, attempt, claim_token, release=True)
 
                 await self._cleanup_pending(job)
-                return self._outcome(
+                outcome = self._outcome(
                     document,
                     job,
                     IndexDecision.INDEXED_FOR_CURRENT_POLICY,
                     DocumentStatus.READY,
                 )
+                self._telemetry.emit(
+                    trace_id=operation_trace,
+                    signal="indexing",
+                    stage="indexing",
+                    outcome="SUCCEEDED",
+                    attributes={
+                        "duration_ms": round((perf_counter() - indexing_started) * 1_000, 2),
+                        "chunk_count": outcome.chunk_count,
+                        "decision": outcome.decision.value,
+                        "document_version": document.version,
+                        "index_identity": self._vectors.identity,
+                    },
+                )
+                return outcome
             except OcrRequiredError as exc:
+                self._emit_failure(operation_trace, phase, exc.code)
                 await session.rollback()
                 try:
                     persisted = await self._persist_terminal(
@@ -488,6 +524,7 @@ class DocumentIndexer:
                     document_id, job_id, IndexDecision.OCR_REQUIRED, exc.code
                 )
             except DocumentValidationError as exc:
+                self._emit_failure(operation_trace, phase, exc.code)
                 await session.rollback()
                 try:
                     persisted = await self._persist_terminal(
@@ -514,6 +551,7 @@ class DocumentIndexer:
                     document_id, job_id, IndexDecision.PERMANENT_FAILURE, exc.code
                 )
             except _IndexLeaseLost:
+                self._emit_failure(operation_trace, phase, "INDEX_LEASE_LOST")
                 await session.rollback()
                 if vector_dirty:
                     try:
@@ -524,6 +562,7 @@ class DocumentIndexer:
                     document_id, job_id, IndexDecision.CONCURRENT_INDEXING, None
                 )
             except _IndexGovernanceChanged:
+                self._emit_failure(operation_trace, phase, "GOVERNANCE_CHANGED")
                 await session.rollback()
                 cleanup_artifacts: list[dict[str, str]] = []
                 if vector_dirty:
@@ -563,6 +602,7 @@ class DocumentIndexer:
             except DocumentIndexRetryableError:
                 raise
             except Exception as exc:
+                self._emit_failure(operation_trace, phase, failure_code)
                 await session.rollback()
                 artifacts = (
                     [
@@ -602,6 +642,21 @@ class DocumentIndexer:
                     "文档索引遇到临时故障，可安全重试",
                     attempt,
                 ) from exc
+
+    def _emit_failure(
+        self,
+        trace_id: UUID,
+        phase: DocumentStatus,
+        error_code: str,
+    ) -> None:
+        signal = "parsing" if phase is DocumentStatus.PARSING else "indexing"
+        self._telemetry.emit(
+            trace_id=trace_id,
+            signal=signal,
+            stage=signal,
+            outcome="FAILED",
+            attributes={"error_code": error_code, "phase": phase.value},
+        )
 
     def _pipeline_identity(self) -> IndexPipelineIdentity:
         chunking = (

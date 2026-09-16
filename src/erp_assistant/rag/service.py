@@ -4,7 +4,7 @@ import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -68,6 +68,7 @@ async def create_document(
     original_filename: str,
     media_type: str,
     data_classification: DataClassification,
+    trace_id: UUID,
 ) -> DocumentCreateResult:
     if data_classification is DataClassification.UNCLASSIFIED:
         raise RagError("DOCUMENT_CLASSIFICATION_REQUIRED", "必须先完成可信文档分类")
@@ -158,7 +159,7 @@ async def create_document(
         await asyncio.to_thread(storage.put_bytes, object_key, content, media_type)
         document.status = DocumentStatus.QUEUED.value
         await session.commit()
-        job.celery_task_id = dispatch(document_id)
+        job.celery_task_id = dispatch(document_id, trace_id)
         await session.commit()
     except Exception as exc:
         document.status = DocumentStatus.FAILED.value
@@ -177,6 +178,8 @@ async def retry_document(
     session: AsyncSession,
     dispatch: DocumentDispatcher,
     document: KnowledgeDocument,
+    *,
+    trace_id: UUID,
 ) -> KnowledgeIndexJob:
     if document.status != DocumentStatus.FAILED.value:
         raise RagError("DOCUMENT_NOT_RETRYABLE", "只有 FAILED 文档可以重试")
@@ -197,7 +200,7 @@ async def retry_document(
     session.add(job)
     await session.commit()
     try:
-        job.celery_task_id = dispatch(document.id)
+        job.celery_task_id = dispatch(document.id, trace_id)
         await session.commit()
     except Exception as exc:
         document.status = DocumentStatus.FAILED.value

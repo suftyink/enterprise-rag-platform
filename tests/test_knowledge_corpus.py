@@ -46,7 +46,10 @@ def KnowledgeCorpus(**kwargs: object):  # type: ignore[no-redef]
 class ControlledProcessor:
     outcome: DocumentIndexOutcome
 
-    async def index(self, document_id: UUID) -> DocumentIndexOutcome:
+    async def index(
+        self, document_id: UUID, *, trace_id: UUID | None = None
+    ) -> DocumentIndexOutcome:
+        del trace_id
         assert document_id == self.outcome.document_id
         return self.outcome
 

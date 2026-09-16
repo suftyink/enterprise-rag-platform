@@ -1,7 +1,7 @@
 # Spec 09：建立可观测性、运行韧性与发布门禁
 
 Type: spec
-Status: ready-for-agent
+Status: resolved
 Blocked by: rag-02-retrieval-evaluation, rag-04-knowledge-governance, rag-07-grounded-answer, rag-08-identity-rbac-audit
 Primary test seam: `PilotReadiness.evaluate()`
 
