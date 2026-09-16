@@ -2,11 +2,17 @@ import json
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Protocol
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from erp_assistant.identity import (
+    IdentityAccess,
+    IdentityAction,
+    IdentityDenied,
+    IdentityResource,
+)
 from erp_assistant.models.answer import KnowledgeAnswerFeedback, KnowledgeAnswerRun
 from erp_assistant.models.knowledge import KnowledgeDocument
 from erp_assistant.orchestration.providers import (
@@ -117,6 +123,7 @@ class KnowledgeAssistant:
         retriever: Retriever,
         chat_routes: dict[DataClassification, ChatProvider],
         session_factory: async_sessionmaker[AsyncSession],
+        identity_access: IdentityAccess,
         context_token_budget: int = 4_096,
     ) -> None:
         if context_token_budget < 64:
@@ -125,17 +132,21 @@ class KnowledgeAssistant:
         self._chat_routes = dict(chat_routes)
         self._sessions = session_factory
         self._feedback = AnswerFeedbackStore(session_factory)
+        self._identity = identity_access
         self._context_token_budget = context_token_budget
 
     async def ask(self, request: AnswerRequest) -> AnswerOutcome:
         if not request.actor.is_trusted:
             raise RagError("UNTRUSTED_ACTOR", "回答请求缺少可信身份")
+        trace_id = uuid4()
+        await self._authorize(request.actor, IdentityAction.ANSWER, trace_id)
         retrieval = await self._retriever.retrieve(
             RetrievalRequest(
                 query=request.question,
                 actor=request.actor,
                 evidence_limit=request.evidence_limit,
                 data_classification=request.data_classification,
+                trace_id=trace_id,
             )
         )
         if retrieval.decision is SearchDecision.INSUFFICIENT_KNOWLEDGE or not retrieval.evidence:
@@ -150,6 +161,7 @@ class KnowledgeAssistant:
                 ),
             )
         context_evidence = self._select_context(retrieval.evidence)
+        await self._authorize(request.actor, IdentityAction.ANSWER, trace_id)
         evidence_by_id = {
             f"E{index}": evidence for index, evidence in enumerate(context_evidence, start=1)
         }
@@ -216,6 +228,7 @@ class KnowledgeAssistant:
                     reason="CHAT_PROVIDER_UNAVAILABLE",
                 ),
             )
+        await self._authorize(request.actor, IdentityAction.ANSWER, trace_id)
         parsed = self._parse_answer(result.content)
         if parsed is None:
             return await self._finish(
@@ -320,6 +333,27 @@ class KnowledgeAssistant:
             )
         )
         return tuple(self._feedback_receipt(row) for row in rows)
+
+    async def _authorize(
+        self,
+        actor: ActorContext,
+        action: IdentityAction,
+        trace_id: UUID,
+    ) -> None:
+        try:
+            await self._identity.authorize(
+                actor,
+                action,
+                IdentityResource(
+                    resource_type="knowledge_scope",
+                    resource_id=actor.tenant_id,
+                    scope=KnowledgeScope.TENANT,
+                    scope_id=actor.tenant_id,
+                ),
+                trace_id=trace_id,
+            )
+        except IdentityDenied as exc:
+            raise RagError(exc.code, exc.message) from exc
 
     async def _finish(
         self,

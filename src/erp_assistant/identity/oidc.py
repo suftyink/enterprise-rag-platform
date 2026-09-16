@@ -147,6 +147,8 @@ class OidcTokenVerifier:
             raise IdentityDenied("INVALID_SIGNATURE", "身份验证失败") from exc
         except jwt_exceptions.PyJWTError as exc:
             raise IdentityDenied("INVALID_TOKEN", "身份验证失败") from exc
+        except Exception as exc:
+            raise IdentityDenied("INVALID_TOKEN", "身份验证失败") from exc
 
     def _decode(
         self,

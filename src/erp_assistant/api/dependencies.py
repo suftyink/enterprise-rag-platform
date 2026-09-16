@@ -83,6 +83,7 @@ def get_knowledge_retriever(
     embedding: Annotated[EmbeddingProvider, Depends(get_embedding_provider)],
     reranker: Annotated[RerankProvider, Depends(get_rerank_provider)],
     settings: Annotated[Settings, Depends(get_settings)],
+    identity_access: Annotated[IdentityAccess, Depends(get_identity_access)],
 ) -> ProfileBoundRetriever:
     retriever = KnowledgeRetriever(
         session=session,
@@ -90,11 +91,13 @@ def get_knowledge_retriever(
         embedding=embedding,
         reranker=reranker,
         settings=settings,
+        identity_access=identity_access,
     )
     return ProfileBoundRetriever(
         session,
         retriever,
         settings,
+        identity_access=identity_access,
         runtime_registry=(
             get_retrieval_runtime_registry() if settings.retrieval_runtime_deployments else None
         ),
@@ -104,6 +107,7 @@ def get_knowledge_retriever(
 def get_knowledge_assistant(
     retriever: Annotated[ProfileBoundRetriever, Depends(get_knowledge_retriever)],
     settings: Annotated[Settings, Depends(get_settings)],
+    identity_access: Annotated[IdentityAccess, Depends(get_identity_access)],
 ) -> KnowledgeAssistant:
     return KnowledgeAssistant(
         retriever=retriever,
@@ -112,5 +116,6 @@ def get_knowledge_assistant(
             DataClassification.RESTRICTED: get_chat_provider_for(DataClassification.RESTRICTED),
         },
         session_factory=SessionFactory,
+        identity_access=identity_access,
         context_token_budget=settings.answer_context_token_budget,
     )

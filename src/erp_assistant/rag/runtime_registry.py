@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from erp_assistant.core.config import Settings
+from erp_assistant.identity import IdentityAccess
 from erp_assistant.models.knowledge import RetrievalProfileRecord
 from erp_assistant.orchestration.providers import (
     EmbeddingProvider,
@@ -108,13 +109,18 @@ class RetrievalRuntimeBinding:
             and self.production_ready
         )
 
-    def build(self, session: AsyncSession) -> KnowledgeRetriever:
+    def build(
+        self,
+        session: AsyncSession,
+        identity_access: IdentityAccess,
+    ) -> KnowledgeRetriever:
         return KnowledgeRetriever(
             session=session,
             vector_store=self.vector_store,
             embedding=self.embedding,
             reranker=self.reranker,
             settings=self.settings,
+            identity_access=identity_access,
         )
 
 
@@ -136,8 +142,9 @@ class RetrievalRuntimeRegistry:
         self,
         profile: RetrievalProfileRecord,
         session: AsyncSession,
+        identity_access: IdentityAccess,
     ) -> KnowledgeRetriever:
-        return self.binding_for(profile).build(session)
+        return self.binding_for(profile).build(session, identity_access)
 
     def binding_for(self, profile: RetrievalProfileRecord) -> RetrievalRuntimeBinding:
         binding = self._bindings.get(self._profile_key(profile))

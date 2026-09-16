@@ -4,6 +4,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from erp_assistant.identity import IdentityAction, IdentityResource
 from erp_assistant.models.knowledge import (
     KnowledgeChunk,
     KnowledgeCleanupRequest,
@@ -35,6 +36,7 @@ from erp_assistant.rag.types import (
     DataClassification,
     DocumentStatus,
     IndexJobStatus,
+    KnowledgeScope,
     PublicationStatus,
     RetentionStatus,
 )
@@ -68,10 +70,8 @@ class KnowledgeCorpus:
                 raise CorpusError("DOCUMENT_NOT_FOUND", "文档不存在")
             await self._authorizer.require(
                 actor,
-                "SUBMIT",
-                document.scope,
-                document.scope_id,
-                str(document.id),
+                IdentityAction.SUBMIT,
+                self._resource(document),
                 operation_trace,
             )
             if document.active or document.publication_status == PublicationStatus.PUBLISHED.value:
@@ -152,10 +152,8 @@ class KnowledgeCorpus:
                 raise CorpusError("DOCUMENT_NOT_FOUND", "文档不存在")
             await self._authorizer.require(
                 actor,
-                "INSPECT",
-                document.scope,
-                document.scope_id,
-                str(document.id),
+                IdentityAction.INSPECT,
+                self._resource(document),
                 trace_id or uuid4(),
             )
             return await self._view(session, document)
@@ -178,10 +176,8 @@ class KnowledgeCorpus:
                 raise CorpusError("DOCUMENT_NOT_FOUND", "文档不存在")
             await self._authorizer.require(
                 actor,
-                action.value,
-                document.scope,
-                document.scope_id,
-                str(document.id),
+                IdentityAction(action.value),
+                self._resource(document),
                 operation_trace,
             )
         try:
@@ -352,6 +348,15 @@ class KnowledgeCorpus:
                 )
                 for request in cleanups
             ),
+        )
+
+    @staticmethod
+    def _resource(document: KnowledgeDocument) -> IdentityResource:
+        return IdentityResource(
+            resource_type="knowledge_document",
+            resource_id=str(document.id),
+            scope=KnowledgeScope(document.scope),
+            scope_id=document.scope_id,
         )
 
     @staticmethod

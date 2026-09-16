@@ -50,7 +50,9 @@ from erp_assistant.rag.index_manifest import (
 )
 from erp_assistant.rag.profile_bound_retriever import ProfileBoundRetriever
 from erp_assistant.rag.retriever import (
-    KnowledgeRetriever,
+    KnowledgeRetriever as _KnowledgeRetriever,
+)
+from erp_assistant.rag.retriever import (
     RetrievalOutcome,
     retrieval_configuration_fingerprint,
 )
@@ -60,6 +62,7 @@ from erp_assistant.rag.runtime_registry import (
 )
 from erp_assistant.rag.types import DataClassification, SearchDecision
 from erp_assistant.rag.vector_store import VectorHit
+from tests.identity_factory import fixture_identity_access
 from tests.retrieval_evaluation_support import (
     DeterministicRetriever,
     environment,
@@ -67,6 +70,10 @@ from tests.retrieval_evaluation_support import (
     outcome,
     write_dataset,
 )
+
+
+def KnowledgeRetriever(**kwargs: object) -> _KnowledgeRetriever:  # type: ignore[misc]
+    return _KnowledgeRetriever(identity_access=fixture_identity_access(), **kwargs)  # type: ignore[arg-type]
 
 
 class OneHitVectorStore:
@@ -573,7 +580,12 @@ async def test_run_uses_only_the_atomically_active_production_binding(
                 )
             ],
         )
-        retriever = ProfileBoundRetriever(retrieval_session, raw_retriever, settings)
+        retriever = ProfileBoundRetriever(
+            retrieval_session,
+            raw_retriever,
+            settings,
+            identity_access=fixture_identity_access(),
+        )
 
         first = await RetrievalEvaluator(retriever, environment()).run(dataset)
         active.configuration_fingerprint = "f" * 64
@@ -1224,11 +1236,12 @@ async def test_run_follows_atomic_active_binding_switch_and_rollback(
         second_profile = profile(second_binding, version=2, status="STAGING")
         retrieval_session.add_all([first_profile, second_profile])
         await retrieval_session.commit()
-        fallback = first_binding.build(retrieval_session)
+        fallback = first_binding.build(retrieval_session, fixture_identity_access())
         retriever = ProfileBoundRetriever(
             retrieval_session,
             fallback,
             settings,
+            identity_access=fixture_identity_access(),
             runtime_registry=registry,
         )
         dataset = write_dataset(

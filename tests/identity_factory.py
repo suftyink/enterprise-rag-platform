@@ -12,6 +12,18 @@ from erp_assistant.identity.directory import StaticIdentityDirectory
 from erp_assistant.rag.knowledge_corpus_contracts import IdentityCorpusAuthorizer
 from erp_assistant.rag.types import KnowledgeScope
 
+_MEMBERSHIPS: dict[str, IdentityMembership] = {}
+_MEMBERSHIPS["evaluation-user"] = IdentityMembership(
+    tenant_id="tenant-a",
+    roles=frozenset({IdentityRole.INTERNAL_EMPLOYEE}),
+    knowledge_scopes=frozenset(
+        {
+            KnowledgeScopeRef(KnowledgeScope.TENANT, "tenant-a"),
+            KnowledgeScopeRef(KnowledgeScope.GLOBAL, "GLOBAL"),
+        }
+    ),
+)
+
 
 def trusted_actor(
     subject_id: str,
@@ -23,14 +35,15 @@ def trusted_actor(
     scopes = {KnowledgeScopeRef(KnowledgeScope.TENANT, tenant_id)}
     if include_global:
         scopes.add(KnowledgeScopeRef(KnowledgeScope.GLOBAL, "GLOBAL"))
-    return ActorContext._from_membership(
-        subject_id,
-        IdentityMembership(
-            tenant_id=tenant_id,
-            roles=roles or frozenset({IdentityRole.INTERNAL_EMPLOYEE}),
-            knowledge_scopes=frozenset(scopes),
+    membership = IdentityMembership(
+        tenant_id=tenant_id,
+        roles=(
+            roles if roles is not None else frozenset({IdentityRole.INTERNAL_EMPLOYEE})
         ),
+        knowledge_scopes=frozenset(scopes),
     )
+    _MEMBERSHIPS[subject_id] = membership
+    return ActorContext._from_membership(subject_id, membership)
 
 
 def trusted_identity(
@@ -68,6 +81,20 @@ class _UnusedVerifier:
 class _NullAudit:
     async def append(self, event: SecurityAuditEvent) -> None:
         del event
+
+
+@dataclass(frozen=True)
+class _FixtureDirectory:
+    async def resolve(self, subject_id: str) -> IdentityMembership | None:
+        return _MEMBERSHIPS.get(subject_id)
+
+
+def fixture_identity_access() -> IdentityAccess:
+    return IdentityAccess(
+        verifier=_UnusedVerifier(),
+        directory=_FixtureDirectory(),
+        audit=_NullAudit(),
+    )
 
 
 def corpus_authorizer() -> IdentityCorpusAuthorizer:

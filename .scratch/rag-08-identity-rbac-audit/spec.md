@@ -1,7 +1,7 @@
 # Spec 08：接入 OIDC、RBAC 与安全审计
 
 Type: spec
-Status: claimed
+Status: resolved
 Blocked by: rag-04-knowledge-governance, rag-07-grounded-answer
 Primary test seam: `IdentityAccess`
 

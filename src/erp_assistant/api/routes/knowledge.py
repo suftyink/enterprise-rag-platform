@@ -23,8 +23,8 @@ from erp_assistant.api.dependencies import (
     get_current_actor,
     get_identity_access,
     get_knowledge_retriever,
-    request_trace_id,
 )
+from erp_assistant.api.knowledge_access import authorize_or_not_found, knowledge_resource
 from erp_assistant.api.knowledge_schemas import (
     KnowledgeDocumentResponse,
     KnowledgeRetryRequest,
@@ -38,7 +38,6 @@ from erp_assistant.identity import (
     ActorContext,
     IdentityAccess,
     IdentityAction,
-    IdentityDenied,
     IdentityResource,
 )
 from erp_assistant.infrastructure.database import get_session
@@ -204,7 +203,7 @@ async def upload_document(
 ) -> KnowledgeDocumentResponse:
     _require_rag(settings)
     scope_id = "GLOBAL" if scope is KnowledgeScope.GLOBAL else actor.tenant_id
-    await _authorize_or_not_found(
+    await authorize_or_not_found(
         access,
         actor,
         IdentityAction.PUBLISH_GLOBAL if scope is KnowledgeScope.GLOBAL else IdentityAction.UPLOAD,
@@ -249,11 +248,11 @@ async def get_document_status(
     document = await session.get(KnowledgeDocument, document_id)
     if document is None:
         raise _error(status.HTTP_404_NOT_FOUND, "DOCUMENT_NOT_FOUND", "文档不存在")
-    await _authorize_or_not_found(
+    await authorize_or_not_found(
         access,
         actor,
         IdentityAction.VIEW_DOCUMENT,
-        _identity_resource(document),
+        knowledge_resource(document),
         request,
     )
     return _response(document, await latest_job(session, document.id))
@@ -279,11 +278,11 @@ async def retry_failed_document(
     document = await session.get(KnowledgeDocument, document_id)
     if document is None:
         raise _error(status.HTTP_404_NOT_FOUND, "DOCUMENT_NOT_FOUND", "文档不存在")
-    await _authorize_or_not_found(
+    await authorize_or_not_found(
         access,
         actor,
         IdentityAction.RETRY,
-        _identity_resource(document),
+        knowledge_resource(document),
         request,
     )
     if document.status == DocumentStatus.OCR_REQUIRED.value:
@@ -307,7 +306,7 @@ async def search_documents(
     retriever: Annotated[ProfileBoundRetriever, Depends(get_knowledge_retriever)],
 ) -> KnowledgeSearchResponse:
     _require_rag(settings)
-    await _authorize_or_not_found(
+    await authorize_or_not_found(
         access,
         actor,
         IdentityAction.SEARCH,
@@ -378,30 +377,3 @@ async def search_documents(
             for evidence in outcome.evidence
         ],
     )
-
-
-def _identity_resource(document: KnowledgeDocument) -> IdentityResource:
-    return IdentityResource(
-        resource_type="knowledge_document",
-        resource_id=str(document.id),
-        scope=KnowledgeScope(document.scope),
-        scope_id=document.scope_id,
-    )
-
-
-async def _authorize_or_not_found(
-    access: IdentityAccess,
-    actor: ActorContext,
-    action: IdentityAction,
-    resource: IdentityResource,
-    request: Request,
-) -> None:
-    try:
-        await access.authorize(
-            actor,
-            action,
-            resource,
-            trace_id=request_trace_id(request),
-        )
-    except IdentityDenied as exc:
-        raise _error(status.HTTP_404_NOT_FOUND, exc.code, exc.message) from exc

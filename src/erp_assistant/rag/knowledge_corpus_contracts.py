@@ -34,10 +34,8 @@ class CorpusAuthorizer(Protocol):
     async def require(
         self,
         actor: CorpusActor,
-        operation: str,
-        scope: str,
-        scope_id: str,
-        resource_id: str,
+        action: IdentityAction,
+        resource: IdentityResource,
         trace_id: UUID,
     ) -> None: ...
 
@@ -68,22 +66,17 @@ class IdentityCorpusAuthorizer:
     async def require(
         self,
         actor: CorpusActor,
-        operation: str,
-        scope: str,
-        scope_id: str,
-        resource_id: str,
+        action: IdentityAction,
+        resource: IdentityResource,
         trace_id: UUID,
     ) -> None:
-        action = IdentityAction(operation)
-        if action is IdentityAction.PUBLISH and scope == "GLOBAL":
+        if action is IdentityAction.PUBLISH and resource.scope is KnowledgeScope.GLOBAL:
             action = IdentityAction.PUBLISH_GLOBAL
         try:
             await self._access.authorize(
                 actor,
                 action,
-                IdentityResource(
-                    "knowledge_document", resource_id, KnowledgeScope(scope), scope_id
-                ),
+                resource,
                 trace_id=trace_id,
             )
         except IdentityDenied as exc:

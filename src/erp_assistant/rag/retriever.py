@@ -13,7 +13,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
 from erp_assistant.core.config import Settings
-from erp_assistant.identity import ActorContext
+from erp_assistant.identity import (
+    ActorContext,
+    IdentityAccess,
+    IdentityAction,
+    IdentityDenied,
+    IdentityResource,
+)
 from erp_assistant.models.knowledge import KnowledgeChunk, KnowledgeDocument
 from erp_assistant.orchestration.providers import (
     EmbeddingProvider,
@@ -85,6 +91,7 @@ class RetrievalRequest:
     actor: ActorContext
     evidence_limit: int = 5
     data_classification: DataClassification = DataClassification.ORDINARY
+    trace_id: UUID = field(default_factory=uuid4)
 
 
 @dataclass(frozen=True)
@@ -142,15 +149,18 @@ class KnowledgeRetriever:
         embedding: EmbeddingProvider,
         reranker: RerankProvider,
         settings: Settings,
+        identity_access: IdentityAccess,
     ) -> None:
         self._session = session
         self._vector_store = vector_store
         self._embedding = embedding
         self._reranker = reranker
         self._settings = settings
+        self._identity = identity_access
 
     async def retrieve(self, request: RetrievalRequest) -> RetrievalOutcome:
         request = self._normalize_request(request)
+        await self._authorize(request)
         self._reset_provider_usage()
         if request.data_classification is DataClassification.UNCLASSIFIED:
             raise RagDependencyError(
@@ -169,16 +179,16 @@ class KnowledgeRetriever:
             raise RagDependencyError(
                 "INDEX_BINDING_MISMATCH", "查询 Embedding 维度与活动索引绑定不一致"
             )
-        trace_id = uuid4()
         started = perf_counter()
         evidence = await self._retrieve_evidence(request)
+        await self._authorize(request)
         return RetrievalOutcome(
             decision=(
                 SearchDecision.MATCHED if evidence else SearchDecision.INSUFFICIENT_KNOWLEDGE
             ),
             evidence=evidence,
             run=RetrievalRun(
-                trace_id=trace_id,
+                trace_id=request.trace_id,
                 retrieval="dense-bm25-rrf-v1",
                 embedding_model=self._embedding.model,
                 rerank_model=self._reranker.model,
@@ -343,7 +353,24 @@ class KnowledgeRetriever:
             actor=request.actor,
             evidence_limit=request.evidence_limit,
             data_classification=request.data_classification,
+            trace_id=request.trace_id,
         )
+
+    async def _authorize(self, request: RetrievalRequest) -> None:
+        try:
+            await self._identity.authorize(
+                request.actor,
+                IdentityAction.SEARCH,
+                IdentityResource(
+                    resource_type="knowledge_scope",
+                    resource_id=request.actor.tenant_id,
+                    scope=KnowledgeScope.TENANT,
+                    scope_id=request.actor.tenant_id,
+                ),
+                trace_id=request.trace_id,
+            )
+        except IdentityDenied as exc:
+            raise RagError(exc.code, exc.message) from exc
 
     @property
     def index_identity(self) -> str:

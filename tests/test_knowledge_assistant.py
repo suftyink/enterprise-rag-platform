@@ -22,7 +22,9 @@ from erp_assistant.rag.knowledge_assistant import (
     AnswerRequest,
     FeedbackRating,
     FeedbackRequest,
-    KnowledgeAssistant,
+)
+from erp_assistant.rag.knowledge_assistant import (
+    KnowledgeAssistant as _KnowledgeAssistant,
 )
 from erp_assistant.rag.retriever import (
     RetrievalEvidence,
@@ -35,7 +37,12 @@ from erp_assistant.rag.types import (
     KnowledgeScope,
     SearchDecision,
 )
+from tests.identity_factory import fixture_identity_access
 from tests.identity_factory import trusted_actor as ActorContext
+
+
+def KnowledgeAssistant(**kwargs: object) -> _KnowledgeAssistant:  # type: ignore[misc]
+    return _KnowledgeAssistant(identity_access=fixture_identity_access(), **kwargs)  # type: ignore[arg-type]
 
 
 @dataclass

@@ -9,6 +9,7 @@ from time import perf_counter
 from uuid import UUID
 
 import httpx
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from erp_assistant.core.config import get_settings
 from erp_assistant.evaluation.answer_quality import AnswerQualityEvaluator
@@ -19,6 +20,7 @@ from erp_assistant.evaluation.models import (
     AnswerQualityGate,
     EvaluationActivation,
     EvaluationCategory,
+    EvaluationDataset,
     EvaluationDatasetError,
     EvaluationEnvironment,
     EvaluationFailure,
@@ -32,6 +34,10 @@ from erp_assistant.evaluation.models import (
     Retriever,
 )
 from erp_assistant.evaluation.profiles import ProfileActivator, SqlRetrievalProfileStore
+from erp_assistant.identity import IdentityAccess, IdentityMembership
+from erp_assistant.identity.audit import SqlSecurityAuditSink
+from erp_assistant.identity.composition import DeterministicIdentityVerifier
+from erp_assistant.identity.directory import StaticIdentityDirectory
 from erp_assistant.infrastructure.database import SessionFactory
 from erp_assistant.models.knowledge import RetrievalProfileRecord
 from erp_assistant.orchestration.provider_factory import (
@@ -355,6 +361,7 @@ async def _run_from_cli(args: argparse.Namespace) -> EvaluationReport:
     index_identity = args.index_identity or settings.milvus_collection
     vector_stores = None
     classifications: set[DataClassification] = set()
+    dataset: EvaluationDataset | None = None
     if not args.base_url:
         dataset = load_dataset(args.dataset)
         classifications = {case.data_classification for case in dataset.cases}
@@ -390,7 +397,9 @@ async def _run_from_cli(args: argparse.Namespace) -> EvaluationReport:
                 args.dataset
             )
     async with SessionFactory() as session:
+        assert dataset is not None
         assert vector_stores is not None
+        identity_access = _evaluation_identity_access(dataset, session)
         retriever = ClassifiedRetrieverRouter(
             {
                 classification: KnowledgeRetriever(
@@ -399,6 +408,7 @@ async def _run_from_cli(args: argparse.Namespace) -> EvaluationReport:
                     embedding=get_embedding_provider_for(classification),
                     reranker=get_rerank_provider_for(classification),
                     settings=settings,
+                    identity_access=identity_access,
                 )
                 for classification in classifications
             }
@@ -411,7 +421,9 @@ async def evaluate_candidate_profile(
     profile_id: UUID,
     registry: RetrievalRuntimeRegistry,
 ) -> EvaluationReport:
+    loaded_dataset = load_dataset(dataset)
     async with SessionFactory() as session:
+        identity_access = _evaluation_identity_access(loaded_dataset, session)
         candidate = await session.get(RetrievalProfileRecord, profile_id)
         if candidate is None:
             raise RagError("PROFILE_NOT_FOUND", "staging Profile 不存在")
@@ -420,7 +432,7 @@ async def evaluate_candidate_profile(
         except ValueError as exc:
             raise RagError("INVALID_RETRIEVAL_PROFILE", "检索 Profile 数据分类无效") from exc
         retriever = ClassifiedRetrieverRouter(
-            {classification: registry.resolve(candidate, session)}
+            {classification: registry.resolve(candidate, session, identity_access)}
         )
         environment = EvaluationEnvironment(
             index_identity=candidate.index_identity,
@@ -436,6 +448,7 @@ async def evaluate_candidate_profile(
             retriever=retriever,
             chat_routes={classification: get_chat_provider_for(classification)},
             session_factory=SessionFactory,
+            identity_access=identity_access,
             context_token_budget=get_settings().answer_context_token_budget,
         )
         return await RetrievalEvaluator(
@@ -445,6 +458,25 @@ async def evaluate_candidate_profile(
             candidate_profile_id=profile_id,
             answer_evaluator=AnswerQualityEvaluator(assistant),
         ).run(dataset)
+
+
+def _evaluation_identity_access(
+    dataset: EvaluationDataset,
+    session: AsyncSession,
+) -> IdentityAccess:
+    memberships = {
+        case.actor.subject_id: IdentityMembership(
+            tenant_id=case.actor.tenant_id,
+            roles=case.actor.roles,
+            knowledge_scopes=case.actor.knowledge_scopes,
+        )
+        for case in dataset.cases
+    }
+    return IdentityAccess(
+        verifier=DeterministicIdentityVerifier(),
+        directory=StaticIdentityDirectory(memberships),
+        audit=SqlSecurityAuditSink(session),
+    )
 
 
 async def _main() -> None:

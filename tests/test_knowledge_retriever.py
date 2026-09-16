@@ -8,6 +8,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import StaticPool
 
 from erp_assistant.core.config import Settings
+from erp_assistant.identity import (
+    IdentityAccess,
+    IdentityMembership,
+    IdentityRole,
+    KnowledgeScopeRef,
+    SecurityAuditEvent,
+)
 from erp_assistant.infrastructure.database import Base
 from erp_assistant.models.knowledge import KnowledgeChunk, KnowledgeDocument
 from erp_assistant.orchestration.fake_providers import (
@@ -17,10 +24,16 @@ from erp_assistant.orchestration.fake_providers import (
 from erp_assistant.orchestration.providers import RankedDocument
 from erp_assistant.rag.chunker import ChunkDraft
 from erp_assistant.rag.errors import RagDependencyError, RagError
-from erp_assistant.rag.retriever import KnowledgeRetriever, RetrievalRequest
-from erp_assistant.rag.types import DocumentStatus, SearchDecision
+from erp_assistant.rag.retriever import KnowledgeRetriever as _KnowledgeRetriever
+from erp_assistant.rag.retriever import RetrievalRequest
+from erp_assistant.rag.types import DocumentStatus, KnowledgeScope, SearchDecision
 from erp_assistant.rag.vector_store import MilvusVectorStore, VectorHit
+from tests.identity_factory import fixture_identity_access
 from tests.identity_factory import trusted_actor as ActorContext
+
+
+def KnowledgeRetriever(**kwargs: object) -> _KnowledgeRetriever:  # type: ignore[misc]
+    return _KnowledgeRetriever(identity_access=fixture_identity_access(), **kwargs)  # type: ignore[arg-type]
 
 
 @dataclass
@@ -53,6 +66,38 @@ class RecordingVectorStore:
         del vector, tenant_id, rrf_k
         self.queries.append(query)
         return self.hits[:limit]
+
+
+@dataclass
+class MutableDirectory:
+    memberships: dict[str, IdentityMembership]
+
+    async def resolve(self, subject_id: str) -> IdentityMembership | None:
+        return self.memberships.get(subject_id)
+
+
+@dataclass
+class RecordingAudit:
+    events: list[SecurityAuditEvent] = field(default_factory=list)
+
+    async def append(self, event: SecurityAuditEvent) -> None:
+        self.events.append(event)
+
+
+@dataclass
+class UnusedVerifier:
+    async def verify(self, credential: str):
+        raise AssertionError(credential)
+
+
+class RevokingEmbedding(FakeEmbeddingProvider):
+    def __init__(self, directory: MutableDirectory) -> None:
+        self._directory = directory
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        vectors = await super().embed(texts)
+        self._directory.memberships.clear()
+        return vectors
 
 
 @pytest_asyncio.fixture
@@ -187,7 +232,54 @@ async def test_retrieve_normalizes_query_before_all_retrieval_dependencies(
             )
         )
 
-    assert vector_store.queries == ["inventory policy"]
+        assert vector_store.queries == ["inventory policy"]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_stops_if_membership_is_revoked_during_search(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    actor = ActorContext(
+        subject_id="user-revoked",
+        tenant_id="tenant-a",
+        include_global=False,
+    )
+    membership = IdentityMembership(
+        tenant_id=actor.tenant_id,
+        roles=frozenset({IdentityRole.INTERNAL_EMPLOYEE}),
+        knowledge_scopes=frozenset(
+            {KnowledgeScopeRef(KnowledgeScope.TENANT, actor.tenant_id)}
+        ),
+    )
+    directory = MutableDirectory({actor.subject_id: membership})
+    audit = RecordingAudit()
+    document = _ready_document("TENANT", "tenant-a", "revoked-policy")
+    chunk = _chunk(document, "membership is revoked while retrieval is running")
+    request = RetrievalRequest(query="revoked policy", actor=actor)
+    async with session_factory() as session:
+        session.add_all([document, chunk])
+        await session.commit()
+        retriever = _KnowledgeRetriever(
+            session=session,
+            vector_store=RecordingVectorStore(
+                hits=[VectorHit(chunk_id=chunk.id, score=0.9)]
+            ),
+            embedding=RevokingEmbedding(directory),
+            reranker=FakeRerankProvider(),
+            settings=Settings(rag_enabled=True),
+            identity_access=IdentityAccess(
+                verifier=UnusedVerifier(),
+                directory=directory,
+                audit=audit,
+            ),
+        )
+
+        with pytest.raises(RagError) as raised:
+            await retriever.retrieve(request)
+
+    assert raised.value.code == "RESOURCE_NOT_FOUND"
+    assert audit.events[-1].reason_code == "MEMBERSHIP_REVOKED"
+    assert audit.events[-1].trace_id == request.trace_id
 
 
 @pytest.mark.asyncio

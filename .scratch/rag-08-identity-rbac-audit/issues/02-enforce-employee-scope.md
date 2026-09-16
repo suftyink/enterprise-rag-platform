@@ -4,12 +4,16 @@
 
 **Blocked by:** 01 / 从 OIDC 解析可信 ActorContext.
 
-**Status:** claimed
+**Status:** resolved
 
-- [ ] Retriever 和 KnowledgeAssistant 只接受可信 ActorContext。
-- [ ] 员工只能访问所属租户和显式允许的全局或共享知识。
-- [ ] 伪造 tenantId、operatorId 或知识范围不会扩大权限。
-- [ ] 无权限文档、版本和知识范围不泄漏存在性或状态。
-- [ ] 检索和回答在权限失效时立即停止返回相关证据。
-- [ ] 授权拒绝产生安全原因码和 trace 关联。
-- [ ] 跨租户隔离场景通过同一 IdentityAccess 行为验证。
+- [x] Retriever 和 KnowledgeAssistant 只接受可信 ActorContext。
+- [x] 员工只能访问所属租户和显式允许的全局或共享知识。
+- [x] 伪造 tenantId、operatorId 或知识范围不会扩大权限。
+- [x] 无权限文档、版本和知识范围不泄漏存在性或状态。
+- [x] 检索和回答在权限失效时立即停止返回相关证据。
+- [x] 授权拒绝产生安全原因码和 trace 关联。
+- [x] 跨租户隔离场景通过同一 IdentityAccess 行为验证。
+
+## Answer
+
+Retriever 与 KnowledgeAssistant 在执行前后均通过 `IdentityAccess` 复核最新成员关系；证据按可信范围过滤，撤权与跨租户拒绝统一返回非泄漏错误并记录 trace 审计。

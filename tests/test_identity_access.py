@@ -173,6 +173,16 @@ async def test_employee_and_administrator_permission_matrix_is_scope_bound() -> 
         trace_id=uuid4(),
     )
 
+    no_role_access, _, _ = _access(_membership())
+    no_role_actor = await no_role_access.authenticate("valid", trace_id=uuid4())
+    with pytest.raises(IdentityDenied):
+        await no_role_access.authorize(
+            no_role_actor,
+            IdentityAction.SEARCH,
+            tenant_resource,
+            trace_id=uuid4(),
+        )
+
 
 @pytest.mark.asyncio
 async def test_revoked_membership_stops_access_and_records_nonleaking_denial() -> None:
@@ -349,3 +359,46 @@ def test_production_refuses_test_identity_and_incomplete_oidc_configuration() ->
                 oidc_jwks_url="https://identity.example.com/jwks",
             )
         )
+
+
+@pytest.mark.asyncio
+async def test_malformed_jwk_is_rejected_and_audited() -> None:
+    private_key, _ = _rsa_key("key-1")
+    audit = RecordingAudit()
+    verifier = OidcTokenVerifier(
+        issuer="https://identity.example.com",
+        audience="erp-assistant",
+        jwks=JwksCache(
+            source=SequenceJwksSource(
+                [
+                    {
+                        "keys": [
+                            {
+                                "kid": "key-1",
+                                "kty": "RSA",
+                                "alg": "RS256",
+                                "n": "***",
+                                "e": "***",
+                            }
+                        ]
+                    }
+                ]
+            ),
+            ttl_seconds=300,
+            max_keys=8,
+        ),
+    )
+    access = IdentityAccess(
+        verifier=verifier,
+        directory=MutableDirectory(
+            {"employee-a": _membership(IdentityRole.INTERNAL_EMPLOYEE)}
+        ),
+        audit=audit,
+    )
+
+    with pytest.raises(IdentityDenied) as raised:
+        await access.authenticate(_token(private_key, "key-1"), trace_id=uuid4())
+
+    assert raised.value.code in {"INVALID_SIGNATURE", "INVALID_TOKEN"}
+    assert audit.events[-1].reason_code == raised.value.code
+    assert audit.events[-1].outcome == "DENIED"

@@ -151,7 +151,16 @@ class IdentityAccess:
         ):
             return "MEMBERSHIP_CHANGED"
         if action in _READ_ACTIONS:
-            return None if actor.can_read(resource.scope, resource.scope_id) else "SCOPE_DENIED"
+            role_allowed = bool(
+                actor.roles
+                & {
+                    IdentityRole.INTERNAL_EMPLOYEE,
+                    IdentityRole.KNOWLEDGE_ADMIN,
+                    IdentityRole.SYSTEM_ADMIN,
+                }
+            )
+            scope_allowed = actor.can_read(resource.scope, resource.scope_id)
+            return None if role_allowed and scope_allowed else "READ_SCOPE_DENIED"
         if action is IdentityAction.PUBLISH_GLOBAL:
             return (
                 None
