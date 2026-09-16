@@ -1,6 +1,8 @@
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
@@ -75,6 +77,12 @@ class FailingChat:
         raise TimeoutError("provider timeout")
 
 
+class BoundarylessChat:
+    async def generate(self, messages: list[ChatMessage]) -> ChatResult:
+        del messages
+        raise AssertionError("provider without a declared boundary must not be called")
+
+
 @dataclass
 class WithdrawingChat(StructuredChat):
     sessions: async_sessionmaker[AsyncSession] | None = None
@@ -129,6 +137,7 @@ async def published_evidence(
     document_key: str = "returns-policy",
     content: str = "Employees may return unopened stock within 30 days.",
     digest: str = "a" * 64,
+    data_classification: DataClassification = DataClassification.ORDINARY,
 ) -> RetrievalEvidence:
     document_id = uuid4()
     async with sessions() as session:
@@ -143,7 +152,7 @@ async def published_evidence(
                 title="Returns Policy",
                 original_filename="returns.md",
                 media_type="text/markdown",
-                data_classification=DataClassification.ORDINARY.value,
+                data_classification=data_classification.value,
                 size_bytes=100,
                 sha256=digest,
                 object_key=f"knowledge/{document_key}.md",
@@ -227,7 +236,9 @@ async def test_ask_returns_answer_with_code_bound_citation(
 async def test_ask_rejects_restricted_evidence_before_cloud_chat_call(
     answer_sessions: async_sessionmaker[AsyncSession],
 ) -> None:
-    evidence = await published_evidence(answer_sessions)
+    evidence = await published_evidence(
+        answer_sessions, data_classification=DataClassification.RESTRICTED
+    )
     retriever = DeterministicRetriever(retrieval_outcome((evidence,)))
     cloud_chat = StructuredChat(
         {"decision": "ANSWERED", "answerUnits": []},
@@ -250,6 +261,31 @@ async def test_ask_rejects_restricted_evidence_before_cloud_chat_call(
     assert outcome.decision is AnswerDecision.ERROR
     assert outcome.reason == "RESTRICTED_ROUTE_FORBIDDEN"
     assert cloud_chat.calls == []
+
+
+@pytest.mark.asyncio
+async def test_ask_fails_closed_when_chat_boundary_is_missing(
+    answer_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    evidence = await published_evidence(
+        answer_sessions, data_classification=DataClassification.RESTRICTED
+    )
+    assistant = KnowledgeAssistant(
+        retriever=DeterministicRetriever(retrieval_outcome((evidence,))),
+        chat_routes={DataClassification.RESTRICTED: BoundarylessChat()},  # type: ignore[dict-item]
+        session_factory=answer_sessions,
+    )
+
+    outcome = await assistant.ask(
+        AnswerRequest(
+            question="What is the restricted policy?",
+            actor=ActorContext(subject_id="employee-a", tenant_id="tenant-a"),
+            data_classification=DataClassification.RESTRICTED,
+        )
+    )
+
+    assert outcome.decision is AnswerDecision.ERROR
+    assert outcome.reason == "CHAT_ROUTE_INVALID"
 
 
 @pytest.mark.asyncio
@@ -438,6 +474,41 @@ async def test_ask_refuses_when_evidence_is_withdrawn_during_generation(
 
 
 @pytest.mark.asyncio
+async def test_ask_refuses_when_uncited_context_changes_during_generation(
+    answer_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    cited = await published_evidence(answer_sessions, document_key="cited-policy", digest="1" * 64)
+    uncited = await published_evidence(
+        answer_sessions, document_key="uncited-policy", digest="2" * 64
+    )
+    chat = WithdrawingChat(
+        payload={
+            "decision": "ANSWERED",
+            "answerUnits": [{"text": "Cited answer.", "evidenceIds": ["E1"]}],
+        },
+        sessions=answer_sessions,
+        document_id=uncited.document_id,
+    )
+    assistant = KnowledgeAssistant(
+        retriever=DeterministicRetriever(retrieval_outcome((cited, uncited))),
+        chat_routes={DataClassification.ORDINARY: chat},
+        session_factory=answer_sessions,
+    )
+
+    outcome = await assistant.ask(
+        AnswerRequest(
+            question="Which source applies?",
+            actor=ActorContext(subject_id="employee-a", tenant_id="tenant-a"),
+        )
+    )
+
+    assert outcome.decision is AnswerDecision.REFUSED
+    assert outcome.reason == "EVIDENCE_CHANGED"
+    assert outcome.units == ()
+    assert outcome.citations == ()
+
+
+@pytest.mark.asyncio
 async def test_feedback_links_to_answer_trace_and_revises_without_copying_content(
     answer_sessions: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -486,6 +557,49 @@ async def test_feedback_links_to_answer_trace_and_revises_without_copying_conten
 
 
 @pytest.mark.asyncio
+async def test_feedback_concurrent_duplicate_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "feedback.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{database_path}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    answer_sessions = async_sessionmaker(engine, expire_on_commit=False)
+    evidence = await published_evidence(answer_sessions)
+    assistant = KnowledgeAssistant(
+        retriever=DeterministicRetriever(retrieval_outcome((evidence,))),
+        chat_routes={
+            DataClassification.ORDINARY: StructuredChat(
+                {
+                    "decision": "ANSWERED",
+                    "answerUnits": [{"text": "Thirty days.", "evidenceIds": ["E1"]}],
+                }
+            )
+        },
+        session_factory=answer_sessions,
+    )
+    actor = ActorContext(subject_id="employee-a", tenant_id="tenant-a")
+    outcome = await assistant.ask(AnswerRequest(question="Return window?", actor=actor))
+    request = FeedbackRequest(
+        trace_id=outcome.trace_id,
+        actor=actor,
+        rating=FeedbackRating.NOT_USEFUL,
+        reason="Needs review.",
+    )
+
+    try:
+        first, second = await asyncio.gather(
+            assistant.submit_feedback(request),
+            assistant.submit_feedback(request),
+        )
+
+        assert first.feedback_id == second.feedback_id
+        assert first.revision == second.revision == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_ask_limits_context_while_preserving_evidence_identity_and_locator(
     answer_sessions: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -521,9 +635,12 @@ async def test_ask_limits_context_while_preserving_evidence_identity_and_locator
         )
     )
     prompt = json.loads(chat.calls[0][1].content)
+    system_prompt = chat.calls[0][0].content
 
     assert outcome.decision is AnswerDecision.ANSWERED
     assert [item["evidenceId"] for item in prompt["evidence"]] == ["E1"]
     assert prompt["evidence"][0]["sourceLocator"] == first.source_locator
     assert len(prompt["evidence"][0]["content"]) < len(first.content)
     assert outcome.citations[0].excerpt == prompt["evidence"][0]["content"]
+    assert "answerUnits" in system_prompt
+    assert "refusalReason" in system_prompt

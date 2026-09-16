@@ -35,6 +35,8 @@ class RankedDocument:
 
 
 class ChatProvider(Protocol):
+    boundary: ProviderBoundary
+
     async def generate(self, messages: list[ChatMessage]) -> ChatResult: ...
 
 

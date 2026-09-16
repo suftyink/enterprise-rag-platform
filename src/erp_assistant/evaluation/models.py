@@ -180,12 +180,34 @@ class QualityGate:
 
 
 @dataclass(frozen=True)
+class AnswerQualityMetrics:
+    case_count: int
+    citation_support_rate: float | None
+    answer_refusal_accuracy: float | None
+
+
+@dataclass(frozen=True)
+class AnswerQualityGate:
+    decision: GateDecision
+    reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class AnswerQualityReport:
+    dataset_version: str
+    dataset_hash: str
+    metrics: AnswerQualityMetrics
+    gate: AnswerQualityGate
+
+
+@dataclass(frozen=True)
 class EvaluationReport:
     metrics: EvaluationMetrics
     metadata: EvaluationMetadata
     failures: tuple[EvaluationFailure, ...]
     category_metrics: dict[str, EvaluationMetrics]
     gate: QualityGate
+    answer_quality: AnswerQualityReport | None = None
     activation: EvaluationActivation | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -238,6 +260,25 @@ class EvaluationReport:
                 "frameworkComplete": self.gate.framework_complete,
                 "reasons": list(self.gate.reasons),
             },
+            "answerQuality": (
+                {
+                    "datasetVersion": self.answer_quality.dataset_version,
+                    "datasetHash": self.answer_quality.dataset_hash,
+                    "metrics": {
+                        "caseCount": self.answer_quality.metrics.case_count,
+                        "citationSupportRate": (self.answer_quality.metrics.citation_support_rate),
+                        "answerRefusalAccuracy": (
+                            self.answer_quality.metrics.answer_refusal_accuracy
+                        ),
+                    },
+                    "gate": {
+                        "decision": self.answer_quality.gate.decision,
+                        "reasons": list(self.answer_quality.gate.reasons),
+                    },
+                }
+                if self.answer_quality
+                else None
+            ),
             "activation": (
                 {
                     "profileId": self.activation.profile_id,

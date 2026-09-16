@@ -13,9 +13,13 @@ from erp_assistant.orchestration.providers import (
 
 
 class FakeChatProvider:
+    boundary = ProviderBoundary.INTERNAL
+    production_ready = False
+    model = "fake-chat-v1"
+
     async def generate(self, messages: list[ChatMessage]) -> ChatResult:
         content = messages[-1].content if messages else ""
-        return ChatResult(content=f"FAKE:{content}", model="fake-chat-v1")
+        return ChatResult(content=f"FAKE:{content}", model=self.model)
 
 
 class FakeGroundedChatProvider:

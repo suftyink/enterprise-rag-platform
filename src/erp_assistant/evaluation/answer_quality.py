@@ -1,11 +1,18 @@
 from dataclasses import dataclass
 from typing import Protocol
 
+from erp_assistant.evaluation.metrics import production_dataset_readiness_reasons
 from erp_assistant.evaluation.models import (
+    AnswerQualityGate,
+    AnswerQualityMetrics,
+    AnswerQualityReport,
+    EvaluationCase,
     EvaluationDataset,
     GateDecision,
+    RelevantSource,
 )
 from erp_assistant.rag.knowledge_assistant import (
+    AnswerCitation,
     AnswerDecision,
     AnswerOutcome,
     AnswerRequest,
@@ -19,29 +26,10 @@ class AnswerQualityThresholds:
     answer_refusal_accuracy: float = 0.90
 
     def __post_init__(self) -> None:
-        if not (0 <= self.citation_support_rate <= 1 and 0 <= self.answer_refusal_accuracy <= 1):
+        if not 0.95 <= self.citation_support_rate <= 1:
+            raise ValueError("Citation support threshold cannot be lower than 95%")
+        if not 0.90 <= self.answer_refusal_accuracy <= 1:
             raise ValueError("Answer quality thresholds are invalid")
-
-
-@dataclass(frozen=True)
-class AnswerQualityMetrics:
-    case_count: int
-    citation_support_rate: float | None
-    answer_refusal_accuracy: float | None
-
-
-@dataclass(frozen=True)
-class AnswerQualityGate:
-    decision: GateDecision
-    reasons: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class AnswerQualityReport:
-    dataset_version: str
-    dataset_hash: str
-    metrics: AnswerQualityMetrics
-    gate: AnswerQualityGate
 
 
 class Assistant(Protocol):
@@ -73,7 +61,7 @@ class AnswerQualityEvaluator:
             )
             if case.expected_decision is SearchDecision.MATCHED:
                 expected_answers += 1
-                supported_answers += int(self._is_supported(outcome))
+                supported_answers += int(self._is_supported(outcome, case))
             else:
                 expected_refusals += 1
                 correct_refusals += int(outcome.decision is AnswerDecision.REFUSED)
@@ -88,11 +76,13 @@ class AnswerQualityEvaluator:
             reasons.append("ANSWER_REFUSAL_ACCURACY_INDETERMINATE")
         elif refusal_accuracy < self._thresholds.answer_refusal_accuracy:
             reasons.append("ANSWER_REFUSAL_ACCURACY_BELOW_THRESHOLD")
+        readiness_reasons = production_dataset_readiness_reasons(dataset.cases)
         decision = GateDecision.PASS
-        if any(reason.endswith("INDETERMINATE") for reason in reasons):
-            decision = GateDecision.INDETERMINATE
-        elif reasons:
+        if any(reason.endswith("BELOW_THRESHOLD") for reason in reasons):
             decision = GateDecision.FAIL
+        elif reasons or readiness_reasons:
+            decision = GateDecision.INDETERMINATE
+            reasons.extend(readiness_reasons)
         return AnswerQualityReport(
             dataset_version=dataset.version,
             dataset_hash=dataset.content_hash,
@@ -105,15 +95,40 @@ class AnswerQualityEvaluator:
         )
 
     @staticmethod
-    def _is_supported(outcome: AnswerOutcome) -> bool:
-        citation_ids = {citation.evidence_id for citation in outcome.citations}
+    def _is_supported(outcome: AnswerOutcome, case: EvaluationCase) -> bool:
+        citations = {citation.evidence_id: citation for citation in outcome.citations}
+        cited = [
+            citations[evidence_id]
+            for unit in outcome.units
+            for evidence_id in unit.evidence_ids
+            if evidence_id in citations
+        ]
         return (
             outcome.decision is AnswerDecision.ANSWERED
             and bool(outcome.units)
+            and bool(cited)
             and all(
-                bool(unit.evidence_ids) and set(unit.evidence_ids).issubset(citation_ids)
+                bool(unit.evidence_ids) and set(unit.evidence_ids).issubset(citations)
                 for unit in outcome.units
             )
+            and all(
+                citation.document_key not in case.forbidden_document_keys
+                and any(
+                    AnswerQualityEvaluator._matches_source(citation, source)
+                    for source in case.expected_sources
+                )
+                for citation in cited
+            )
+        )
+
+    @staticmethod
+    def _matches_source(citation: AnswerCitation, source: RelevantSource) -> bool:
+        return (
+            citation.document_key == source.document_key
+            and citation.page_start is not None
+            and citation.page_end is not None
+            and citation.page_start <= source.page_end
+            and citation.page_end >= source.page_start
         )
 
     @staticmethod

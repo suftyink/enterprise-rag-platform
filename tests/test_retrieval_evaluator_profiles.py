@@ -14,9 +14,14 @@ from sqlalchemy.pool import StaticPool
 
 from erp_assistant.core.config import Settings
 from erp_assistant.evaluation.models import (
+    AnswerQualityGate,
+    AnswerQualityMetrics,
+    AnswerQualityReport,
+    EvaluationDataset,
     EvaluationEnvironment,
     EvaluationFailureKind,
     EvaluationReport,
+    GateDecision,
     QualityThresholds,
 )
 from erp_assistant.evaluation.profiles import (
@@ -120,6 +125,33 @@ class FailIfCalledActivator:
     async def activate(self, profile_id: UUID, report: EvaluationReport) -> ProfileActivation:
         del profile_id, report
         raise AssertionError("A profile that missed a gate must not be activated")
+
+
+class PassingAnswerEvaluator:
+    async def run(self, dataset: EvaluationDataset) -> AnswerQualityReport:
+        return AnswerQualityReport(
+            dataset_version=dataset.version,
+            dataset_hash=dataset.content_hash,
+            metrics=AnswerQualityMetrics(
+                case_count=len(dataset.cases),
+                citation_support_rate=1.0,
+                answer_refusal_accuracy=1.0,
+            ),
+            gate=AnswerQualityGate(decision=GateDecision.PASS, reasons=()),
+        )
+
+
+class FailingAnswerEvaluator(PassingAnswerEvaluator):
+    async def run(self, dataset: EvaluationDataset) -> AnswerQualityReport:
+        report = await super().run(dataset)
+        return replace(
+            report,
+            metrics=replace(report.metrics, citation_support_rate=0.90),
+            gate=AnswerQualityGate(
+                decision=GateDecision.FAIL,
+                reasons=("CITATION_SUPPORT_RATE_BELOW_THRESHOLD",),
+            ),
+        )
 
 
 class ProfileStoreHarness(SqlRetrievalProfileStore):
@@ -236,9 +268,7 @@ async def profile_store() -> AsyncIterator[ProfileStoreHarness]:
             )
         )
         await session.commit()
-    yield ProfileStoreHarness(
-        factory, runtime_binding_validator=lambda profile: bool(profile.id)
-    )
+    yield ProfileStoreHarness(factory, runtime_binding_validator=lambda profile: bool(profile.id))
     await engine.dispose()
 
 
@@ -955,6 +985,7 @@ async def test_run_activates_only_passing_staging_profiles_and_supports_rollback
             ),
             activator=profile_store,
             candidate_profile_id=candidate.id,
+            answer_evaluator=PassingAnswerEvaluator(),  # type: ignore[arg-type]
         ).run(dataset)
 
     first_report = await evaluate(first)
@@ -1009,6 +1040,7 @@ async def test_run_rejects_profile_when_passing_evidence_does_not_match_binding(
         ),
         activator=profile_store,
         candidate_profile_id=profile_id,
+        answer_evaluator=PassingAnswerEvaluator(),  # type: ignore[arg-type]
     ).run(dataset)
 
     assert report.activation is None
@@ -1049,6 +1081,26 @@ async def test_run_blocks_profile_when_configured_latency_gate_is_missed(
 
     assert "LATENCY_P95_ABOVE_THRESHOLD" in report.gate.reasons
     assert report.activation is None
+
+
+@pytest.mark.asyncio
+async def test_run_blocks_profile_when_answer_quality_gate_fails(tmp_path: Path) -> None:
+    cases, outcomes = _passing_business_scenario()
+    dataset = write_dataset(tmp_path / "answer-gate-failure.jsonl", cases)
+
+    report = await RetrievalEvaluator(
+        DeterministicRetriever(outcomes),
+        environment(),
+        activator=FailIfCalledActivator(),
+        candidate_profile_id=uuid4(),
+        answer_evaluator=FailingAnswerEvaluator(),  # type: ignore[arg-type]
+    ).run(dataset)
+
+    assert report.gate.decision is GateDecision.FAIL
+    assert report.activation is None
+    assert report.answer_quality is not None
+    assert report.answer_quality.metrics.citation_support_rate == 0.90
+    assert "ANSWER_QUALITY_CITATION_SUPPORT_RATE_BELOW_THRESHOLD" in report.gate.reasons
 
 
 @pytest.mark.asyncio

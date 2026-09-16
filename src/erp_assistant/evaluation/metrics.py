@@ -107,16 +107,7 @@ def build_gate(
             reasons=tuple(failure_reasons),
         )
 
-    indeterminate_reasons: list[str] = []
-    present_categories = {category for case in cases for category in case.categories}
-    if present_categories != set(EvaluationCategory):
-        indeterminate_reasons.append("REQUIRED_CATEGORIES_INCOMPLETE")
-    if len(cases) < 100:
-        indeterminate_reasons.append("PRODUCTION_CASE_COUNT_TOO_LOW")
-    if any(case.provenance != DatasetProvenance.BUSINESS for case in cases):
-        indeterminate_reasons.append("NON_BUSINESS_CASES")
-    if any(not case.reviewed for case in cases):
-        indeterminate_reasons.append("UNREVIEWED_CASES")
+    indeterminate_reasons = list(production_dataset_readiness_reasons(cases))
     if metrics.recall_at_5 is None or metrics.mrr_at_5 is None or metrics.refusal_accuracy is None:
         indeterminate_reasons.append("REQUIRED_METRICS_UNAVAILABLE")
     if indeterminate_reasons:
@@ -132,6 +123,22 @@ def build_gate(
         framework_complete=True,
         reasons=(),
     )
+
+
+def production_dataset_readiness_reasons(
+    cases: tuple[EvaluationCase, ...],
+) -> tuple[str, ...]:
+    reasons: list[str] = []
+    present_categories = {category for case in cases for category in case.categories}
+    if present_categories != set(EvaluationCategory):
+        reasons.append("REQUIRED_CATEGORIES_INCOMPLETE")
+    if len(cases) < 100:
+        reasons.append("PRODUCTION_CASE_COUNT_TOO_LOW")
+    if any(case.provenance != DatasetProvenance.BUSINESS for case in cases):
+        reasons.append("NON_BUSINESS_CASES")
+    if any(not case.reviewed for case in cases):
+        reasons.append("UNREVIEWED_CASES")
+    return tuple(reasons)
 
 
 def _is_relevant(evidence: RetrievalEvidence, source: RelevantSource) -> bool:

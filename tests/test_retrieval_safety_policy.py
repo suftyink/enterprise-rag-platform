@@ -85,6 +85,15 @@ def test_restricted_chat_route_is_validated_before_allocating_client(
     assert len(provider_factory._http_clients) == before
 
 
+def test_production_rejects_fake_chat_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = Settings(app_env="production", chat_provider="fake")
+    monkeypatch.setattr(provider_factory, "get_settings", lambda: settings)
+    get_chat_provider_for.cache_clear()
+
+    with pytest.raises(ValueError, match="production-ready"):
+        get_chat_provider_for(DataClassification.ORDINARY)
+
+
 def test_runtime_registry_prevalidates_every_route_before_allocating_clients() -> None:
     settings = Settings(
         restricted_provider_allowed_hosts="internal-model.corp",

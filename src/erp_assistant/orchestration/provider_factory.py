@@ -141,6 +141,8 @@ def get_chat_provider_for(classification: DataClassification) -> ChatProvider:
     settings = get_settings()
     provider = settings.chat_provider
     if provider == "fake":
+        if settings.app_env.casefold() in {"prod", "production"}:
+            raise ValueError("Chat provider must be production-ready in production")
         return FakeGroundedChatProvider()
     if provider == "http":
         prefix = "restricted" if classification is DataClassification.RESTRICTED else "ordinary"

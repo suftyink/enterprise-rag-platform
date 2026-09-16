@@ -11,10 +11,12 @@ from uuid import UUID
 import httpx
 
 from erp_assistant.core.config import get_settings
+from erp_assistant.evaluation.answer_quality import AnswerQualityEvaluator
 from erp_assistant.evaluation.dataset import load_dataset
 from erp_assistant.evaluation.http_adapter import HttpRetrievalAdapter
 from erp_assistant.evaluation.metrics import build_gate, calculate_metrics
 from erp_assistant.evaluation.models import (
+    AnswerQualityGate,
     EvaluationActivation,
     EvaluationCategory,
     EvaluationDatasetError,
@@ -26,17 +28,20 @@ from erp_assistant.evaluation.models import (
     EvaluationRoute,
     GateDecision,
     ObservedCase,
+    QualityGate,
     Retriever,
 )
 from erp_assistant.evaluation.profiles import ProfileActivator, SqlRetrievalProfileStore
 from erp_assistant.infrastructure.database import SessionFactory
 from erp_assistant.models.knowledge import RetrievalProfileRecord
 from erp_assistant.orchestration.provider_factory import (
+    get_chat_provider_for,
     get_embedding_provider_for,
     get_rerank_provider_for,
 )
 from erp_assistant.rag.classified_retriever import ClassifiedRetrieverRouter
 from erp_assistant.rag.errors import RagDependencyError, RagError
+from erp_assistant.rag.knowledge_assistant import KnowledgeAssistant
 from erp_assistant.rag.retriever import KnowledgeRetriever, RetrievalRequest, RetrievalRun
 from erp_assistant.rag.runtime_composition import get_retrieval_runtime_registry
 from erp_assistant.rag.runtime_registry import RetrievalRuntimeRegistry
@@ -62,6 +67,7 @@ class RetrievalEvaluator:
         *,
         activator: ProfileActivator | None = None,
         candidate_profile_id: UUID | None = None,
+        answer_evaluator: AnswerQualityEvaluator | None = None,
     ) -> None:
         if (activator is None) != (candidate_profile_id is None):
             raise ValueError("Activator and candidate profile ID must be supplied together")
@@ -69,6 +75,7 @@ class RetrievalEvaluator:
         self._environment = environment
         self._activator = activator
         self._candidate_profile_id = candidate_profile_id
+        self._answer_evaluator = answer_evaluator
 
     async def run(self, dataset_path: Path) -> EvaluationReport:
         executed_at = datetime.now(UTC).isoformat()
@@ -187,6 +194,30 @@ class RetrievalEvaluator:
             category_metrics=category_metrics,
             gate=gate,
         )
+        if self._answer_evaluator is not None:
+            answer_quality = await self._answer_evaluator.run(dataset)
+            report = replace(
+                report,
+                answer_quality=answer_quality,
+                gate=_merge_answer_quality_gate(report.gate, answer_quality.gate),
+            )
+        elif self._activator is not None and report.gate.decision is GateDecision.PASS:
+            missing_gate = EvaluationFailure(
+                case_id=f"profile:{self._candidate_profile_id}",
+                code="ANSWER_QUALITY_GATE_MISSING",
+                kind=EvaluationFailureKind.RETRIEVAL_CONFIGURATION,
+            )
+            updated_failures = [*report.failures, missing_gate]
+            report = replace(
+                report,
+                failures=tuple(updated_failures),
+                gate=build_gate(
+                    report.metrics,
+                    dataset.cases,
+                    updated_failures,
+                    self._environment.thresholds,
+                ),
+            )
         if (
             report.gate.decision is GateDecision.PASS
             and self._activator is not None
@@ -240,6 +271,27 @@ def _identity(run: RetrievalRun) -> tuple[object, ...]:
         run.provider_boundary,
         run.production_ready,
         tuple(sorted(run.retrieval_config.items())),
+    )
+
+
+def _merge_answer_quality_gate(
+    retrieval_gate: QualityGate,
+    answer_gate: AnswerQualityGate,
+) -> QualityGate:
+    answer_decision = answer_gate.decision
+    answer_reasons = tuple(f"ANSWER_QUALITY_{reason}" for reason in answer_gate.reasons)
+    decision = retrieval_gate.decision
+    if answer_decision is GateDecision.FAIL:
+        decision = GateDecision.FAIL
+    elif answer_decision is GateDecision.INDETERMINATE and decision is GateDecision.PASS:
+        decision = GateDecision.INDETERMINATE
+    return QualityGate(
+        decision=decision,
+        production_baseline_approved=(
+            retrieval_gate.production_baseline_approved and answer_decision is GateDecision.PASS
+        ),
+        framework_complete=retrieval_gate.framework_complete,
+        reasons=(*retrieval_gate.reasons, *answer_reasons),
     )
 
 
@@ -374,11 +426,18 @@ async def evaluate_candidate_profile(
             SessionFactory,
             runtime_binding_validator=registry.can_resolve,
         )
+        assistant = KnowledgeAssistant(
+            retriever=retriever,
+            chat_routes={classification: get_chat_provider_for(classification)},
+            session_factory=SessionFactory,
+            context_token_budget=get_settings().answer_context_token_budget,
+        )
         return await RetrievalEvaluator(
             retriever,
             environment,
             activator=activator,
             candidate_profile_id=profile_id,
+            answer_evaluator=AnswerQualityEvaluator(assistant),
         ).run(dataset)
 
 

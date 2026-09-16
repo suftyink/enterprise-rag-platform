@@ -14,6 +14,7 @@ from erp_assistant.orchestration.providers import (
     ChatProvider,
     ProviderBoundary,
 )
+from erp_assistant.rag.answer_feedback_store import AnswerFeedbackStore
 from erp_assistant.rag.errors import RagDependencyError
 from erp_assistant.rag.knowledge_eligibility import retrieval_eligibility_filters
 from erp_assistant.rag.retriever import (
@@ -123,6 +124,7 @@ class KnowledgeAssistant:
         self._retriever = retriever
         self._chat_routes = dict(chat_routes)
         self._sessions = session_factory
+        self._feedback = AnswerFeedbackStore(session_factory)
         self._context_token_budget = context_token_budget
 
     async def ask(self, request: AnswerRequest) -> AnswerOutcome:
@@ -149,6 +151,17 @@ class KnowledgeAssistant:
         evidence_by_id = {
             f"E{index}": evidence for index, evidence in enumerate(context_evidence, start=1)
         }
+        if not await self._evidence_is_current(request, context_evidence):
+            return await self._finish(
+                request,
+                AnswerOutcome(
+                    trace_id=retrieval.run.trace_id,
+                    decision=AnswerDecision.REFUSED,
+                    units=(),
+                    citations=(),
+                    reason="EVIDENCE_CHANGED",
+                ),
+            )
         provider = self._chat_routes.get(request.data_classification)
         if provider is None:
             return await self._finish(
@@ -161,7 +174,19 @@ class KnowledgeAssistant:
                     reason="CHAT_ROUTE_UNAVAILABLE",
                 ),
             )
-        boundary = ProviderBoundary(getattr(provider, "boundary", ProviderBoundary.INTERNAL))
+        try:
+            boundary = ProviderBoundary(provider.boundary)
+        except (AttributeError, ValueError):
+            return await self._finish(
+                request,
+                AnswerOutcome(
+                    trace_id=retrieval.run.trace_id,
+                    decision=AnswerDecision.ERROR,
+                    units=(),
+                    citations=(),
+                    reason="CHAT_ROUTE_INVALID",
+                ),
+            )
         if (
             request.data_classification is DataClassification.RESTRICTED
             and boundary is not ProviderBoundary.INTERNAL
@@ -243,7 +268,7 @@ class KnowledgeAssistant:
                 ),
             )
         cited_evidence = {item: evidence_by_id[item] for item in cited_ids}
-        if not await self._evidence_is_current(request, tuple(cited_evidence.values())):
+        if not await self._evidence_is_current(request, context_evidence):
             return await self._finish(
                 request,
                 AnswerOutcome(
@@ -274,57 +299,22 @@ class KnowledgeAssistant:
         reason = request.reason.strip() if request.reason else None
         if reason is not None and (not reason or len(reason) > 500):
             raise ValueError("Feedback reason is invalid")
-        async with self._sessions() as session:
-            run = await session.get(KnowledgeAnswerRun, request.trace_id)
-            if (
-                run is None
-                or run.subject_id != request.actor.subject_id
-                or run.tenant_id != request.actor.tenant_id
-            ):
-                raise LookupError("Answer trace does not exist")
-            feedback = await session.scalar(
-                select(KnowledgeAnswerFeedback).where(
-                    KnowledgeAnswerFeedback.trace_id == request.trace_id,
-                    KnowledgeAnswerFeedback.subject_id == request.actor.subject_id,
-                )
-            )
-            if feedback is None:
-                feedback = KnowledgeAnswerFeedback(
-                    trace_id=request.trace_id,
-                    subject_id=request.actor.subject_id,
-                    tenant_id=request.actor.tenant_id,
-                    answer_decision=run.decision,
-                    rating=request.rating.value,
-                    reason=reason,
-                )
-                session.add(feedback)
-            elif feedback.rating != request.rating.value or feedback.reason != reason:
-                feedback.rating = request.rating.value
-                feedback.reason = reason
-                feedback.revision += 1
-            await session.commit()
-            await session.refresh(feedback)
-            return self._feedback_receipt(feedback)
+        feedback = await self._feedback.save(
+            trace_id=request.trace_id,
+            subject_id=request.actor.subject_id,
+            tenant_id=request.actor.tenant_id,
+            rating=request.rating.value,
+            reason=reason,
+        )
+        return self._feedback_receipt(feedback)
 
     async def feedback_review_candidates(self) -> tuple[FeedbackReceipt, ...]:
-        async with self._sessions() as session:
-            rows = (
-                await session.scalars(
-                    select(KnowledgeAnswerFeedback)
-                    .where(
-                        KnowledgeAnswerFeedback.rating.in_(
-                            [
-                                FeedbackRating.NOT_USEFUL.value,
-                                FeedbackRating.CITATION_ISSUE.value,
-                            ]
-                        )
-                    )
-                    .order_by(
-                        KnowledgeAnswerFeedback.updated_at,
-                        KnowledgeAnswerFeedback.id,
-                    )
-                )
-            ).all()
+        rows = await self._feedback.review_candidates(
+            (
+                FeedbackRating.NOT_USEFUL.value,
+                FeedbackRating.CITATION_ISSUE.value,
+            )
+        )
         return tuple(self._feedback_receipt(row) for row in rows)
 
     async def _finish(
@@ -453,10 +443,16 @@ class KnowledgeAssistant:
             ChatMessage(
                 role="system",
                 content=(
-                    "Return JSON only. Use only supplied evidence IDs. "
-                    "Every factual answer unit must include evidenceIds. "
-                    "If authoritative evidence conflicts, return REFUSED with "
-                    "refusalReason CONFLICTING_EVIDENCE."
+                    "Return one JSON object only. Allowed schemas: "
+                    '{"decision":"ANSWERED","answerUnits":['
+                    '{"text":"concise factual statement","evidenceIds":["E1"]}]}'
+                    " or "
+                    '{"decision":"REFUSED","refusalReason":"CONFLICTING_EVIDENCE"}. '
+                    "refusalReason must be exactly one of INSUFFICIENT_KNOWLEDGE or "
+                    "CONFLICTING_EVIDENCE. "
+                    "Use only supplied evidence IDs. Every factual answer unit must "
+                    "have non-empty text and at least one evidenceIds entry. If "
+                    "authoritative evidence conflicts, refuse with CONFLICTING_EVIDENCE."
                 ),
             ),
             ChatMessage(

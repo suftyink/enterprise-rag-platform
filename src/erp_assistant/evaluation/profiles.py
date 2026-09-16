@@ -121,6 +121,16 @@ class SqlRetrievalProfileStore:
     async def activate(self, profile_id: UUID, report: EvaluationReport) -> ProfileActivation:
         if report.gate.decision is not GateDecision.PASS:
             raise RagError("PROFILE_GATE_NOT_PASSED", "只有通过完整质量门禁的 Profile 才能激活")
+        if (
+            report.answer_quality is None
+            or report.answer_quality.gate.decision is not GateDecision.PASS
+            or report.answer_quality.dataset_version != report.metadata.dataset_version
+            or report.answer_quality.dataset_hash != report.metadata.dataset_hash
+        ):
+            raise RagError(
+                "ANSWER_QUALITY_GATE_NOT_PASSED",
+                "只有通过回答质量门禁的 Profile 才能激活",
+            )
         executed_at = datetime.fromisoformat(report.metadata.executed_at)
         if datetime.now(UTC) - executed_at > self._maximum_evidence_age:
             raise RagError("PROFILE_EVIDENCE_EXPIRED", "Profile 评测证据已过期")
@@ -136,9 +146,7 @@ class SqlRetrievalProfileStore:
             try:
                 classification = DataClassification(candidate.data_classification)
             except ValueError as exc:
-                raise RagError(
-                    "INVALID_RETRIEVAL_PROFILE", "检索 Profile 数据分类无效"
-                ) from exc
+                raise RagError("INVALID_RETRIEVAL_PROFILE", "检索 Profile 数据分类无效") from exc
             await lock_corpus_generation(session, classification)
             snapshot = await capture_corpus_snapshot(session, classification)
             expected_manifest = build_manifest(candidate, snapshot)
