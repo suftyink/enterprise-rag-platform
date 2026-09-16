@@ -15,6 +15,7 @@ from erp_assistant.operations.production_probes import (
 )
 from erp_assistant.operations.telemetry import get_telemetry
 from erp_assistant.orchestration.provider_factory import close_retrieval_provider_clients
+from erp_assistant.web.router import router as web_router
 
 
 @asynccontextmanager
@@ -70,6 +71,7 @@ def create_app() -> FastAPI:
         return response
 
     application.include_router(api_router)
+    application.include_router(web_router)
     return application
 
 

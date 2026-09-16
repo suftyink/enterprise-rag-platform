@@ -31,6 +31,7 @@ class IdentityAction(StrEnum):
     MARK_CLEANUP_FAILED = "MARK_CLEANUP_FAILED"
     RETRY_CLEANUP = "RETRY_CLEANUP"
     COMPLETE_CLEANUP = "COMPLETE_CLEANUP"
+    MANAGE_PILOT = "MANAGE_PILOT"
 
 
 @dataclass(frozen=True)

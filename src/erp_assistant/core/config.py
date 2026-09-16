@@ -133,7 +133,16 @@ class Settings(BaseSettings):
     oidc_subject_claim: str = "sub"
     oidc_jwks_cache_seconds: int = Field(default=300, gt=0, le=86_400)
     oidc_jwks_max_keys: int = Field(default=32, gt=0, le=128)
+    oidc_authorization_url: str = ""
+    oidc_token_url: str = ""
+    oidc_client_id: str = ""
+    oidc_client_secret: SecretStr = SecretStr("")
+    oidc_scopes: str = "openid profile"
     identity_memberships_json: str = "{}"
+    internal_web_base_url: str = "http://localhost:8000"
+    internal_web_session_ttl_seconds: int = Field(default=28_800, ge=300, le=86_400)
+    internal_web_auth_state_ttl_seconds: int = Field(default=600, ge=60, le=1_800)
+    internal_web_test_subject: str = ""
     evaluation_bearer_token: SecretStr = SecretStr("")
     pilot_release_fingerprint: str = Field(default="", pattern=r"^(?:|[0-9a-f]{64})$")
 

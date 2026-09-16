@@ -208,6 +208,12 @@ class IdentityAccess:
                 and resource.scope is KnowledgeScope.GLOBAL
                 else "GLOBAL_PRIVILEGE_REQUIRED"
             )
+        if action is IdentityAction.MANAGE_PILOT:
+            return (
+                None
+                if IdentityRole.SYSTEM_ADMIN in actor.roles
+                else "SYSTEM_ADMIN_REQUIRED"
+            )
         if action in _GOVERNANCE_ACTIONS:
             if IdentityRole.SYSTEM_ADMIN in actor.roles:
                 return None

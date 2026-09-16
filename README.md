@@ -8,7 +8,7 @@
 - Function：查询实时库存、订单、采购、物流和 Amazon 数据；后续受控执行建单或修改。
 - 实时业务事实只来自白名单 Function，不能由模型或知识 Chunk 猜测。
 - 写操作必须经过服务端权限检查、幂等控制以及确认或审批。
-- 当前版本已包含文本型 PDF 的 RAG 入库与检索，不包含 OCR、自然语言回答、真实模型、前端、业务连接器和写操作。
+- 当前版本已包含四格式知识入库、混合检索、引用回答、身份与审计、发布门禁及内部 Web 试点入口；不包含 OCR、业务连接器和 ERP 写操作。
 
 ## 架构
 
@@ -39,7 +39,8 @@ src/erp_assistant/
 ├── connectors/      # ERP、Amazon、物流 Adapter
 ├── infrastructure/  # PostgreSQL、Redis、Milvus、MinIO
 ├── workers/         # Celery 任务
-└── evaluation/      # 评测与反馈
+├── evaluation/      # 评测与反馈
+└── web/             # 内部员工问答、知识治理与试点门禁
 ```
 
 ## 环境初始化
@@ -76,6 +77,8 @@ uv run python -m uvicorn erp_assistant.main:app --reload
 
 API 文档：`http://127.0.0.1:8000/docs`
 
+内部 Web：`http://127.0.0.1:8000/internal`
+
 Windows 开发环境启动 Worker：
 
 ```powershell
@@ -97,6 +100,34 @@ uv run python -m celery -A erp_assistant.workers.celery_app:celery_app beat --lo
 - `GET /api/assistant/v1/knowledge/documents/{documentId}`：查询解析与索引状态。
 - `POST /api/assistant/v1/knowledge/documents/{documentId}/retry`：重试失败任务。
 - `POST /api/assistant/v1/knowledge/search`：检索租户私有和全局共享知识 Chunk。
+- `GET /internal`：内部员工引用问答、知识治理与试点门禁入口。
+
+### 内部 Web 试点
+
+本地开发可使用确定性身份适配器，但必须显式配置测试主体及其服务端权限映射：
+
+```dotenv
+IDENTITY_PROVIDER=test
+INTERNAL_WEB_TEST_SUBJECT=employee-a
+IDENTITY_MEMBERSHIPS_JSON={"employee-a":{"tenantId":"tenant-a","roles":["INTERNAL_EMPLOYEE"],"knowledgeScopes":[{"scope":"GLOBAL","scopeId":"GLOBAL"}]}}
+```
+
+生产环境禁止测试身份适配器，必须配置 OIDC Authorization Code + PKCE 所需的 issuer、audience、JWKS、authorization/token URL、client ID 和准确的 HTTPS 回调基址：
+
+```dotenv
+IDENTITY_PROVIDER=oidc
+OIDC_ISSUER=https://identity.example.com
+OIDC_AUDIENCE=erp-assistant
+OIDC_JWKS_URL=https://identity.example.com/.well-known/jwks.json
+OIDC_AUTHORIZATION_URL=https://identity.example.com/authorize
+OIDC_TOKEN_URL=https://identity.example.com/token
+OIDC_CLIENT_ID=erp-assistant-web
+INTERNAL_WEB_BASE_URL=https://assistant.example.com
+```
+
+浏览器会话使用 Redis 中的服务端凭据、`HttpOnly` 会话 Cookie、同站策略和 CSRF 令牌。问答、上传和治理接口还受试点门禁保护：只有最近 24 小时内、与 `PILOT_RELEASE_FINGERPRINT` 一致的 `PASS` Readiness 报告，连同系统管理员记录的范围、容量、监控负责人和回滚负责人，才能开放。关闭试点只追加关闭记录，不删除知识数据。
+
+代码和自动化浏览器流程通过不代表生产试点已获批准；仍需代表性员工与知识管理员使用真实身份、真实知识、真实模型和生产类基础设施完成验收。
 
 任务示例：
 
@@ -218,16 +249,17 @@ docker compose --profile rag config --quiet
 - `ChatProvider`、`EmbeddingProvider`、`RerankProvider` 及其确定性 Fake 实现已经建立。
 - Celery Worker 和无业务副作用的健康任务已经建立。
 - `knowledge_document`、`knowledge_chunk` 和 `knowledge_index_job` 数据模型及迁移已经建立。
-- 文本型 PDF 可以保存到 MinIO，经 Celery 解析、分页切分后写入 PostgreSQL 和 Milvus。
+- PDF、DOCX、Markdown 和 HTML 可以保存到 MinIO，经 Celery 解析、结构化切分后写入 PostgreSQL 和 Milvus。
 - 已实现哈希去重、安全版本切换、失败重试、扫描件识别和带页码检索。
 - 检索同时支持租户私有知识和全局共享知识，并执行 Milvus 与 PostgreSQL 双层租户过滤。
 - Fake Embedding 已升级为确定性的 256 维词项及中文字符特征向量 `fake-lexical-v1`。
 - 检索已升级为 Dense + BM25、RRF、Rerank 和低置信度门禁，并提供可重建的新版本 Collection。
 - 检索响应包含 `traceId`、检索管线版本、最终归一化分数和 `MATCHED`/`INSUFFICIENT_KNOWLEDGE` 决策。
+- 内部 Web 已串联企业 SSO、引用回答、拒答/错误区分、反馈、四格式上传、警告审核、发布/撤回/回滚和试点开放/关闭；所有权限决策仍由服务端执行。
 - 已建立版本化检索评测框架、分类指标、可复现报告和机器可判定质量门禁；真实业务基线仍待业务方复核批准。
 - Ruff、Mypy、Pytest 和依赖兼容性检查已经通过。
 
-OCR、复杂表格、真实 Embedding/Rerank、引用回答、业务连接器、前端和写操作仍属于后续范围。
+OCR、复杂表格、业务连接器、IM 集成、GraphRAG、Agent 和 ERP 写操作仍属于后续范围；真实模型、真实身份和生产类基础设施验收仍是开放生产试点前的外部门槛。
 
 ## 后续实施路线
 

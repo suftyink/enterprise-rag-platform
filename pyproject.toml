@@ -24,6 +24,7 @@ dependencies = [
 dev = [
   "aiosqlite>=0.21,<1",
   "mypy>=1.17,<2",
+  "playwright>=1.55,<2",
   "pytest>=8.4,<10",
   "pytest-asyncio>=1.1,<2",
   "pytest-cov>=6.2,<8",

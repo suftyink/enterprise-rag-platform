@@ -125,7 +125,7 @@ async def _read_document(
     return content, page_count, filename, declared
 
 
-def _response(
+def document_response(
     document: KnowledgeDocument,
     job: KnowledgeIndexJob | None,
     *,
@@ -242,7 +242,7 @@ async def upload_document(
         raise _error(status.HTTP_409_CONFLICT, exc.code, exc.message) from exc
     if result.duplicate:
         response.status_code = status.HTTP_200_OK
-    return _response(result.document, result.job, duplicate=result.duplicate)
+    return document_response(result.document, result.job, duplicate=result.duplicate)
 
 
 @router.get("/knowledge/documents/{document_id}", response_model=KnowledgeDocumentResponse)
@@ -263,7 +263,7 @@ async def get_document_status(
         knowledge_resource(document),
         request,
     )
-    return _response(document, await latest_job(session, document.id))
+    return document_response(document, await latest_job(session, document.id))
 
 
 @router.post(
@@ -306,7 +306,7 @@ async def retry_failed_document(
         raise _error(status.HTTP_503_SERVICE_UNAVAILABLE, exc.code, exc.message) from exc
     except RagError as exc:
         raise _error(status.HTTP_409_CONFLICT, exc.code, exc.message) from exc
-    return _response(document, job)
+    return document_response(document, job)
 
 
 @router.post("/knowledge/search", response_model=KnowledgeSearchResponse)

@@ -422,6 +422,9 @@ async def test_configuration_and_queue_probes_feed_the_unified_readiness_seam(
             oidc_issuer="https://identity.example.test",
             oidc_audience="erp-assistant",
             oidc_jwks_url="https://identity.example.test/keys",
+            oidc_authorization_url="https://identity.example.test/authorize",
+            oidc_token_url="https://identity.example.test/token",
+            oidc_client_id="erp-assistant-web",
         ),
         ProductionConfigurationProbe(
             model_routes_available=False,

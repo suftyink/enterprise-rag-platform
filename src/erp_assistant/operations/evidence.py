@@ -36,6 +36,9 @@ def production_configuration_evidence(
             and bool(settings.oidc_audience)
             and bool(settings.oidc_jwks_url)
             and bool(settings.oidc_subject_claim)
+            and bool(settings.oidc_authorization_url)
+            and bool(settings.oidc_token_url)
+            and bool(settings.oidc_client_id)
         ),
         "model_routes": probe.model_routes_available,
         "index_dimensions": probe.index_dimensions_match,

@@ -1,7 +1,7 @@
 # Spec 10：交付内部员工 Web 试点入口与验收
 
 Type: spec
-Status: ready-for-agent
+Status: claimed
 Blocked by: rag-04-knowledge-governance, rag-07-grounded-answer, rag-08-identity-rbac-audit, rag-09-observability-release-gates
 Primary test seam: internal Web user workflow
 

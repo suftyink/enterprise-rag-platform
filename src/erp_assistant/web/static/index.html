@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>跨境知识台 · 内部试点</title>
+    <link rel="stylesheet" href="/internal/assets/app.css">
+    <script type="module" src="/internal/assets/app.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">跳到主要内容</a>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand-block">
+          <span class="brand-mark" aria-hidden="true">CB</span>
+          <div>
+            <p class="eyebrow">CROSS-BORDER OPERATIONS</p>
+            <p class="brand-name">跨境知识台</p>
+          </div>
+        </div>
+        <div class="session-block">
+          <span id="pilot-badge" class="status-chip" data-tone="neutral">检查试点状态</span>
+          <span id="session-user" class="session-user">正在连接企业身份…</span>
+          <button id="logout-button" class="text-button" type="button" hidden>退出</button>
+        </div>
+      </header>
+
+      <aside class="sidebar" aria-label="主要导航">
+        <p class="sidebar-label">工作台</p>
+        <nav class="nav-list">
+          <button class="nav-button is-active" type="button" data-view="ask-view" aria-current="page">
+            <span aria-hidden="true">01</span><span>引用问答</span>
+          </button>
+          <button id="governance-nav" class="nav-button" type="button" data-view="governance-view" hidden>
+            <span aria-hidden="true">02</span><span>知识治理</span>
+          </button>
+          <button id="pilot-nav" class="nav-button" type="button" data-view="pilot-view" hidden>
+            <span aria-hidden="true">03</span><span>试点门禁</span>
+          </button>
+        </nav>
+        <div class="sidebar-note">
+          <span class="route-line" aria-hidden="true"></span>
+          <p>问题 → 答案 → 引用</p>
+          <small>每次操作均关联服务端 trace。</small>
+        </div>
+      </aside>
+
+      <main id="main-content" class="workspace" tabindex="-1">
+        <div id="global-status" class="global-status" role="status" aria-live="polite"></div>
+
+        <section id="ask-view" class="view is-active" aria-labelledby="ask-heading">
+          <div class="view-heading">
+            <div>
+              <p class="eyebrow">EMPLOYEE ANSWER DESK</p>
+              <h1 id="ask-heading">从已发布知识中获得可核查答案</h1>
+              <p>系统只依据当前身份可见且已发布的资料回答；证据不足时会明确拒答。</p>
+            </div>
+            <span class="trace-label">TRACE <strong id="answer-trace">—</strong></span>
+          </div>
+
+          <form id="question-form" class="question-card">
+            <label for="question-input">你的业务问题</label>
+            <textarea id="question-input" name="question" rows="4" maxlength="2000" required
+              aria-describedby="question-help" placeholder="例如：欧洲仓库存差异应在几个工作日内完成复核？"></textarea>
+            <div class="form-footer">
+              <small id="question-help">不需要填写租户或知识范围，访问边界由服务器根据企业身份确定。</small>
+              <button id="ask-button" class="primary-button" type="submit">查询知识</button>
+            </div>
+          </form>
+
+          <div id="answer-state" class="answer-state" role="status" aria-live="polite" hidden></div>
+          <article id="answer-panel" class="answer-panel" hidden aria-labelledby="answer-heading">
+            <header>
+              <div>
+                <p class="eyebrow">GROUNDED RESPONSE</p>
+                <h2 id="answer-heading">知识回答</h2>
+              </div>
+              <span id="answer-decision" class="status-chip"></span>
+            </header>
+            <div id="answer-units" class="answer-units"></div>
+            <form id="feedback-form" class="feedback-panel" hidden>
+              <fieldset>
+                <legend>这次回答是否有帮助？</legend>
+                <label><input type="radio" name="rating" value="USEFUL" required> 有帮助</label>
+                <label><input type="radio" name="rating" value="NOT_USEFUL"> 没有帮助</label>
+                <label><input type="radio" name="rating" value="CITATION_ISSUE"> 引用有问题</label>
+              </fieldset>
+              <label for="feedback-reason">补充说明（可选）</label>
+              <textarea id="feedback-reason" name="reason" maxlength="500" rows="2"></textarea>
+              <button class="secondary-button" type="submit">提交反馈</button>
+              <span id="feedback-status" role="status" aria-live="polite"></span>
+            </form>
+          </article>
+        </section>
+
+        <section id="governance-view" class="view" aria-labelledby="governance-heading" hidden>
+          <div class="view-heading">
+            <div>
+              <p class="eyebrow">KNOWLEDGE GOVERNANCE</p>
+              <h1 id="governance-heading">文档入库与发布治理</h1>
+              <p>先核对解析警告和版本，再执行发布、撤回或回滚。</p>
+            </div>
+            <button id="refresh-documents" class="text-button" type="button">刷新列表</button>
+          </div>
+
+          <form id="upload-form" class="upload-card">
+            <div>
+              <label for="document-file">选择资料</label>
+              <input id="document-file" name="file" type="file"
+                accept=".pdf,.docx,.md,.markdown,.html,.htm" required>
+              <small id="upload-limits">支持 PDF、DOCX、Markdown、HTML。</small>
+            </div>
+            <div>
+              <label for="document-title">资料标题</label>
+              <input id="document-title" name="title" maxlength="255" required>
+            </div>
+            <div>
+              <label for="document-key">文档编号</label>
+              <input id="document-key" name="documentKey" maxlength="128" required>
+            </div>
+            <div>
+              <label for="document-scope">发布范围</label>
+              <select id="document-scope" name="scope" required></select>
+            </div>
+            <button id="upload-button" class="primary-button" type="submit">上传并开始处理</button>
+            <span id="upload-status" role="status" aria-live="polite"></span>
+          </form>
+          <div id="document-list" class="document-list" aria-live="polite"></div>
+        </section>
+
+        <section id="pilot-view" class="view" aria-labelledby="pilot-heading" hidden>
+          <div class="view-heading">
+            <div>
+              <p class="eyebrow">CONTROLLED RELEASE</p>
+              <h1 id="pilot-heading">内部生产试点门禁</h1>
+              <p>只有当前发布指纹对应的 24 小时内 PASS 报告可用于开放。</p>
+            </div>
+          </div>
+          <div id="pilot-evidence" class="evidence-card"></div>
+          <form id="pilot-form" class="pilot-form">
+            <label for="pilot-scope">试点范围</label>
+            <input id="pilot-scope" name="pilotScope" maxlength="255" required placeholder="例如：华东运营组 30 人">
+            <label for="pilot-capacity">容量约束</label>
+            <input id="pilot-capacity" name="capacity" maxlength="255" required placeholder="例如：10 RPS / 30 并发">
+            <label for="monitoring-owner">监控负责人</label>
+            <input id="monitoring-owner" name="monitoringOwner" maxlength="128" required>
+            <label for="rollback-owner">回滚负责人</label>
+            <input id="rollback-owner" name="rollbackOwner" maxlength="128" required>
+            <label for="pilot-reason">批准原因</label>
+            <textarea id="pilot-reason" name="reason" maxlength="500" rows="3" required></textarea>
+            <div class="button-row">
+              <button class="primary-button" type="submit" data-pilot-action="enable">开放试点</button>
+              <button class="danger-button" type="submit" data-pilot-action="disable">关闭试点</button>
+            </div>
+            <span id="pilot-form-status" role="status" aria-live="polite"></span>
+          </form>
+        </section>
+      </main>
+
+      <aside id="evidence-rail" class="evidence-rail" aria-labelledby="evidence-heading">
+        <p class="eyebrow">EVIDENCE ROUTE</p>
+        <h2 id="evidence-heading">引用证据</h2>
+        <p id="evidence-empty">完成一次回答后，引用会按出现顺序列在这里。</p>
+        <ol id="citation-list" class="citation-list"></ol>
+      </aside>
+    </div>
+
+    <dialog id="citation-dialog" aria-labelledby="citation-dialog-title">
+      <div class="dialog-header">
+        <h2 id="citation-dialog-title">引用详情</h2>
+        <button class="icon-button" type="button" data-close-dialog aria-label="关闭引用详情">×</button>
+      </div>
+      <dl id="citation-detail" class="citation-detail"></dl>
+    </dialog>
+
+    <dialog id="confirm-dialog" aria-labelledby="confirm-title">
+      <form method="dialog">
+        <div class="dialog-header">
+          <h2 id="confirm-title">确认治理操作</h2>
+          <button class="icon-button" value="cancel" aria-label="取消操作">×</button>
+        </div>
+        <p id="confirm-copy"></p>
+        <label for="confirm-reason">操作原因</label>
+        <textarea id="confirm-reason" maxlength="500" rows="3" required></textarea>
+        <div class="button-row">
+          <button class="text-button" value="cancel">取消</button>
+          <button id="confirm-submit" class="danger-button" value="confirm">确认执行</button>
+        </div>
+      </form>
+    </dialog>
+  </body>
+</html>
