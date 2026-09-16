@@ -8,10 +8,12 @@ from math import isfinite
 from time import perf_counter
 from uuid import UUID, uuid4
 
-from sqlalchemy import or_, select
+from sqlalchemy import false, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from erp_assistant.core.config import Settings
+from erp_assistant.identity import ActorContext
 from erp_assistant.models.knowledge import KnowledgeChunk, KnowledgeDocument
 from erp_assistant.orchestration.providers import (
     EmbeddingProvider,
@@ -23,6 +25,17 @@ from erp_assistant.rag.errors import RagDependencyError, RagError
 from erp_assistant.rag.knowledge_eligibility import retrieval_eligibility_filters
 from erp_assistant.rag.types import DataClassification, KnowledgeScope, SearchDecision
 from erp_assistant.rag.vector_store import VectorStore
+
+__all__ = [
+    "ActorContext",
+    "KnowledgeRetriever",
+    "RetrievalEvidence",
+    "RetrievalOutcome",
+    "RetrievalRequest",
+    "RetrievalRun",
+    "retrieval_configuration",
+    "retrieval_configuration_fingerprint",
+]
 
 
 def retrieval_configuration_fingerprint(
@@ -44,9 +57,7 @@ def retrieval_configuration(
     embedding: EmbeddingProvider,
     reranker: RerankProvider,
 ) -> dict[str, int | float | bool | str]:
-    embedding_boundary = ProviderBoundary(
-        getattr(embedding, "boundary", ProviderBoundary.INTERNAL)
-    )
+    embedding_boundary = ProviderBoundary(getattr(embedding, "boundary", ProviderBoundary.INTERNAL))
     rerank_boundary = ProviderBoundary(getattr(reranker, "boundary", embedding_boundary))
     if embedding_boundary is not rerank_boundary:
         raise RagDependencyError(
@@ -66,12 +77,6 @@ def retrieval_configuration(
         "vectorIndex": str(getattr(vector_store, "identity", settings.milvus_collection)),
         "providerBoundary": embedding_boundary.value,
     }
-
-
-@dataclass(frozen=True)
-class ActorContext:
-    subject_id: str
-    tenant_id: str
 
 
 @dataclass(frozen=True)
@@ -202,6 +207,16 @@ class KnowledgeRetriever:
         index_filter = KnowledgeChunk.index_identity == self.index_identity
         if self._settings.app_env.casefold() != "production":
             index_filter = or_(index_filter, KnowledgeChunk.index_identity == "legacy")
+        scope_filter: ColumnElement[bool] = false()
+        if request.actor.can_read(KnowledgeScope.TENANT, request.actor.tenant_id):
+            scope_filter = (KnowledgeDocument.scope == KnowledgeScope.TENANT.value) & (
+                KnowledgeDocument.scope_id == request.actor.tenant_id
+            )
+        if request.actor.can_read(KnowledgeScope.GLOBAL, "GLOBAL"):
+            scope_filter = or_(
+                scope_filter,
+                KnowledgeDocument.scope == KnowledgeScope.GLOBAL.value,
+            )
         try:
             vector = (await self._embedding.embed([request.query]))[0]
         except RagDependencyError:
@@ -238,13 +253,7 @@ class KnowledgeRetriever:
                         == str(getattr(self._embedding, "deployment", "legacy")),
                         KnowledgeChunk.embedding_dimension == self._embedding.dimension,
                         index_filter,
-                        or_(
-                            KnowledgeDocument.scope == KnowledgeScope.GLOBAL.value,
-                            (
-                                (KnowledgeDocument.scope == KnowledgeScope.TENANT.value)
-                                & (KnowledgeDocument.scope_id == request.actor.tenant_id)
-                            ),
-                        ),
+                        scope_filter,
                     )
                 )
             ).all()
@@ -325,12 +334,13 @@ class KnowledgeRetriever:
             or len(subject_id) > 64
             or not tenant_id
             or len(tenant_id) > 64
+            or not request.actor.is_trusted
             or not 1 <= request.evidence_limit <= 20
         ):
             raise RagError("INVALID_RETRIEVAL_REQUEST", "检索请求无效")
         return RetrievalRequest(
             query=query,
-            actor=ActorContext(subject_id=subject_id, tenant_id=tenant_id),
+            actor=request.actor,
             evidence_limit=request.evidence_limit,
             data_classification=request.data_classification,
         )

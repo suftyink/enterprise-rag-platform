@@ -4,7 +4,7 @@
 
 **Blocked by:** 02 / 强制员工检索与问答范围授权.
 
-**Status:** ready-for-agent
+**Status:** claimed
 
 - [ ] 员工、知识管理员和系统管理员具有明确的 action/resource 权限矩阵。
 - [ ] 知识管理员不能治理未分配租户或知识范围。

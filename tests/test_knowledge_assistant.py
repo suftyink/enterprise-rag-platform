@@ -25,7 +25,6 @@ from erp_assistant.rag.knowledge_assistant import (
     KnowledgeAssistant,
 )
 from erp_assistant.rag.retriever import (
-    ActorContext,
     RetrievalEvidence,
     RetrievalOutcome,
     RetrievalRequest,
@@ -36,6 +35,7 @@ from erp_assistant.rag.types import (
     KnowledgeScope,
     SearchDecision,
 )
+from tests.identity_factory import trusted_actor as ActorContext
 
 
 @dataclass

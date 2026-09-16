@@ -4,7 +4,7 @@
 
 **Blocked by:** rag-04-knowledge-governance/03 / 支持回滚、清理补偿与并发审计; rag-07-grounded-answer/03 / 建立回答反馈与质量门禁.
 
-**Status:** ready-for-agent
+**Status:** claimed
 
 - [ ] 合法令牌解析为 subject、tenant、roles 和知识范围信息。
 - [ ] 过期、签名错误、issuer 错误、audience 错误和缺少 claim 均被拒绝。

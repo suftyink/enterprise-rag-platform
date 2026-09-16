@@ -1,5 +1,5 @@
 from typing import cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -26,7 +26,6 @@ from erp_assistant.rag.knowledge_corpus_contracts import (
     CorpusError,
     CorpusProcessor,
     LifecycleAction,
-    TrustedActorAuthorizer,
 )
 from erp_assistant.rag.knowledge_eligibility import is_retrieval_eligible
 from erp_assistant.rag.knowledge_queries import latest_job
@@ -47,11 +46,11 @@ class KnowledgeCorpus:
         *,
         session_factory: async_sessionmaker[AsyncSession],
         processor: CorpusProcessor,
-        authorizer: CorpusAuthorizer | None = None,
+        authorizer: CorpusAuthorizer,
     ) -> None:
         self._sessions = session_factory
         self._processor = processor
-        self._authorizer = authorizer or TrustedActorAuthorizer()
+        self._authorizer = authorizer
 
     async def submit(
         self,
@@ -59,13 +58,22 @@ class KnowledgeCorpus:
         actor: CorpusActor,
         *,
         reason: str,
+        trace_id: UUID | None = None,
     ) -> CorpusDocumentView:
         reason = self._reason(reason)
+        operation_trace = trace_id or uuid4()
         async with self._sessions() as session:
             document = await session.get(KnowledgeDocument, document_id)
             if document is None:
                 raise CorpusError("DOCUMENT_NOT_FOUND", "文档不存在")
-            self._authorizer.require(actor, "SUBMIT", document.scope, document.scope_id)
+            await self._authorizer.require(
+                actor,
+                "SUBMIT",
+                document.scope,
+                document.scope_id,
+                str(document.id),
+                operation_trace,
+            )
             if document.active or document.publication_status == PublicationStatus.PUBLISHED.value:
                 raise CorpusError(
                     "PUBLISHED_DOCUMENT_REQUIRES_NEW_VERSION",
@@ -129,14 +137,27 @@ class KnowledgeCorpus:
                 )
             )
             await session.commit()
-        return await self.inspect(document_id, actor)
+        return await self.inspect(document_id, actor, trace_id=operation_trace)
 
-    async def inspect(self, document_id: UUID, actor: CorpusActor) -> CorpusDocumentView:
+    async def inspect(
+        self,
+        document_id: UUID,
+        actor: CorpusActor,
+        *,
+        trace_id: UUID | None = None,
+    ) -> CorpusDocumentView:
         async with self._sessions() as session:
             document = await session.get(KnowledgeDocument, document_id)
             if document is None:
                 raise CorpusError("DOCUMENT_NOT_FOUND", "文档不存在")
-            self._authorizer.require(actor, "INSPECT", document.scope, document.scope_id)
+            await self._authorizer.require(
+                actor,
+                "INSPECT",
+                document.scope,
+                document.scope_id,
+                str(document.id),
+                trace_id or uuid4(),
+            )
             return await self._view(session, document)
 
     async def transition(
@@ -147,13 +168,22 @@ class KnowledgeCorpus:
         *,
         reason: str,
         expected_revision: int,
+        trace_id: UUID | None = None,
     ) -> CorpusDocumentView:
         reason = self._reason(reason)
+        operation_trace = trace_id or uuid4()
         async with self._sessions() as session:
             document = await session.get(KnowledgeDocument, document_id)
             if document is None:
                 raise CorpusError("DOCUMENT_NOT_FOUND", "文档不存在")
-            self._authorizer.require(actor, action.value, document.scope, document.scope_id)
+            await self._authorizer.require(
+                actor,
+                action.value,
+                document.scope,
+                document.scope_id,
+                str(document.id),
+                operation_trace,
+            )
         try:
             await self._transition(document_id, action, actor, reason, expected_revision)
         except CorpusError as exc:
@@ -165,7 +195,7 @@ class KnowledgeCorpus:
                 exc.code,
             )
             raise
-        return await self.inspect(document_id, actor)
+        return await self.inspect(document_id, actor, trace_id=operation_trace)
 
     async def _transition(
         self,

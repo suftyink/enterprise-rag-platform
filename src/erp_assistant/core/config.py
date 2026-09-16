@@ -126,16 +126,15 @@ class Settings(BaseSettings):
     knowledge_min_text_per_page: int = 20
     knowledge_embedding_batch_size: int = 64
     knowledge_index_lease_seconds: int = 900
-    allow_global_knowledge_upload: bool = False
-    global_knowledge_operator_ids: str = ""
-
-    @property
-    def global_knowledge_operators(self) -> set[str]:
-        return {
-            value.strip()
-            for value in self.global_knowledge_operator_ids.split(",")
-            if value.strip()
-        }
+    identity_provider: Literal["oidc", "test"] = "test"
+    oidc_issuer: str = ""
+    oidc_audience: str = ""
+    oidc_jwks_url: str = ""
+    oidc_subject_claim: str = "sub"
+    oidc_jwks_cache_seconds: int = Field(default=300, gt=0, le=86_400)
+    oidc_jwks_max_keys: int = Field(default=32, gt=0, le=128)
+    identity_memberships_json: str = "{}"
+    evaluation_bearer_token: SecretStr = SecretStr("")
 
     @property
     def restricted_document_keys(self) -> set[str]:

@@ -11,8 +11,13 @@ from erp_assistant.evaluation.models import (
     EvaluationDatasetError,
     RelevantSource,
 )
-from erp_assistant.rag.retriever import ActorContext
-from erp_assistant.rag.types import DataClassification, SearchDecision
+from erp_assistant.identity import (
+    ActorContext,
+    IdentityMembership,
+    IdentityRole,
+    KnowledgeScopeRef,
+)
+from erp_assistant.rag.types import DataClassification, KnowledgeScope, SearchDecision
 
 _CASE_FIELDS = {
     "actor",
@@ -153,7 +158,19 @@ def _parse_case(value: Any, line_number: int) -> EvaluationCase:
         case_id=case_id.strip(),
         dataset_version=version.strip(),
         question=question.strip(),
-        actor=ActorContext(subject_id=subject_id.strip(), tenant_id=tenant_id.strip()),
+        actor=ActorContext._from_membership(
+            subject_id.strip(),
+            IdentityMembership(
+                tenant_id=tenant_id.strip(),
+                roles=frozenset({IdentityRole.INTERNAL_EMPLOYEE}),
+                knowledge_scopes=frozenset(
+                    {
+                        KnowledgeScopeRef(KnowledgeScope.TENANT, tenant_id.strip()),
+                        KnowledgeScopeRef(KnowledgeScope.GLOBAL, "GLOBAL"),
+                    }
+                ),
+            ),
+        ),
         expected_sources=sources,
         expected_decision=expected_decision,
         categories=category_set,

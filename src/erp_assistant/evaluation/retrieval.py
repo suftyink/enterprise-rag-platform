@@ -379,7 +379,13 @@ async def _run_from_cli(args: argparse.Namespace) -> EvaluationReport:
         ),
     )
     if args.base_url:
-        async with httpx.AsyncClient(base_url=args.base_url, timeout=30.0) as client:
+        credential = settings.evaluation_bearer_token.get_secret_value()
+        headers = {"Authorization": f"Bearer {credential}"} if credential else None
+        async with httpx.AsyncClient(
+            base_url=args.base_url,
+            timeout=30.0,
+            headers=headers,
+        ) as client:
             return await RetrievalEvaluator(HttpRetrievalAdapter(client), environment).run(
                 args.dataset
             )

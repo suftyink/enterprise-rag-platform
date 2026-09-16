@@ -22,8 +22,8 @@ from erp_assistant.rag.knowledge_assistant import (
     AnswerRequest,
     AnswerUnit,
 )
-from erp_assistant.rag.retriever import ActorContext
 from erp_assistant.rag.types import DataClassification, SearchDecision
+from tests.identity_factory import trusted_actor as ActorContext
 
 
 @dataclass

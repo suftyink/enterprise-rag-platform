@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 / 从 OIDC 解析可信 ActorContext.
 
-**Status:** ready-for-agent
+**Status:** claimed
 
 - [ ] Retriever 和 KnowledgeAssistant 只接受可信 ActorContext。
 - [ ] 员工只能访问所属租户和显式允许的全局或共享知识。

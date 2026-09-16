@@ -9,7 +9,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
+from erp_assistant.api.dependencies import get_current_actor, get_identity_access
 from erp_assistant.core.config import Settings, get_settings
+from erp_assistant.identity import IdentityRole
 from erp_assistant.infrastructure.database import Base, get_session
 from erp_assistant.infrastructure.object_storage import get_object_storage
 from erp_assistant.main import app
@@ -22,6 +24,7 @@ from erp_assistant.rag.types import DocumentStatus
 from erp_assistant.rag.vector_store import VectorHit, get_vector_store
 from erp_assistant.workers.dispatcher import get_document_dispatcher
 from tests.document_factory import make_docx
+from tests.identity_factory import trusted_identity
 from tests.pdf_factory import make_pdf
 
 KnowledgeApiContext = tuple[
@@ -87,6 +90,12 @@ async def knowledge_api() -> AsyncIterator[KnowledgeApiContext]:
     storage = FakeStorage()
     vector_store = FakeVectorStore()
     settings = Settings(rag_enabled=True)
+    actor, identity_access = trusted_identity(
+        "user-a",
+        "tenant-a",
+        roles=frozenset({IdentityRole.KNOWLEDGE_ADMIN}),
+        include_global=True,
+    )
 
     async def override_session() -> AsyncIterator[AsyncSession]:
         async with factory() as session:
@@ -99,6 +108,8 @@ async def knowledge_api() -> AsyncIterator[KnowledgeApiContext]:
     app.dependency_overrides[get_document_dispatcher] = lambda: (
         lambda document_id: f"task-{document_id}"
     )
+    app.dependency_overrides[get_current_actor] = lambda: actor
+    app.dependency_overrides[get_identity_access] = lambda: identity_access
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             yield client, factory, storage, vector_store
@@ -111,8 +122,6 @@ async def _upload(
     client: AsyncClient,
     *,
     content: bytes | None = None,
-    tenant_id: str = "tenant-a",
-    operator_id: str = "user-a",
     scope: str = "TENANT",
     document_key: str = "inventory-sop",
     filename: str = "inventory.pdf",
@@ -130,8 +139,6 @@ async def _upload(
             )
         },
         data={
-            "tenantId": tenant_id,
-            "operatorId": operator_id,
             "scope": scope,
             "documentKey": document_key,
         },
@@ -162,7 +169,6 @@ async def test_upload_status_and_hash_deduplication(
 
     status_response = await client.get(
         f"/api/assistant/v1/knowledge/documents/{first.json()['documentId']}",
-        params={"tenantId": "tenant-a", "operatorId": "user-a"},
     )
     assert status_response.status_code == 200
     assert status_response.json()["status"] == "QUEUED"
@@ -180,7 +186,43 @@ async def test_upload_status_and_hash_deduplication(
         f"/api/assistant/v1/knowledge/documents/{first.json()['documentId']}",
         params={"tenantId": "tenant-b", "operatorId": "user-b"},
     )
-    assert hidden.status_code == 404
+    assert hidden.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_protected_api_ignores_forged_identity_fields_and_requires_bearer(
+    knowledge_api: KnowledgeApiContext,
+) -> None:
+    client, factory, _, _ = knowledge_api
+    forged = await client.post(
+        "/api/assistant/v1/knowledge/documents",
+        files={
+            "file": (
+                "forged.pdf",
+                make_pdf(["Trusted actor identity must win over request data. " * 4]),
+                "application/pdf",
+            )
+        },
+        data={
+            "tenantId": "tenant-b",
+            "operatorId": "attacker",
+            "documentKey": "forged-identity",
+        },
+    )
+    assert forged.status_code == 202
+    async with factory() as session:
+        document = await session.get(KnowledgeDocument, UUID(forged.json()["documentId"]))
+    assert document is not None
+    assert document.tenant_id == "tenant-a"
+    assert document.created_by == "user-a"
+
+    app.dependency_overrides.pop(get_current_actor)
+    unauthenticated = await client.post(
+        "/api/assistant/v1/knowledge/search",
+        json={"query": "inventory", "topK": 5},
+    )
+    assert unauthenticated.status_code == 401
+    assert unauthenticated.json()["detail"]["code"] == "AUTHENTICATION_REQUIRED"
 
 
 @pytest.mark.asyncio
@@ -251,18 +293,18 @@ async def test_upload_validation_and_global_gate(
     wrong_type = await client.post(
         "/api/assistant/v1/knowledge/documents",
         files={"file": ("note.txt", b"not pdf", "text/plain")},
-        data={"tenantId": "tenant-a", "operatorId": "user-a"},
+        data={},
     )
     assert wrong_type.status_code == 415
     mismatch = await client.post(
         "/api/assistant/v1/knowledge/documents",
         files={"file": ("renamed.pdf", b"# Actually markdown", "application/pdf")},
-        data={"tenantId": "tenant-a", "operatorId": "user-a"},
+        data={},
     )
     assert mismatch.status_code == 422
     assert mismatch.json()["detail"]["code"] == "MEDIA_TYPE_MISMATCH"
     global_upload = await _upload(client, scope="GLOBAL")
-    assert global_upload.status_code == 403
+    assert global_upload.status_code == 404
 
 
 @pytest.mark.asyncio
@@ -285,7 +327,7 @@ async def test_retry_failed_but_not_ocr_document(
         await session.commit()
     retried = await client.post(
         f"/api/assistant/v1/knowledge/documents/{document_id}/retry",
-        json={"tenantId": "tenant-a", "operatorId": "user-a"},
+        json={},
     )
     assert retried.status_code == 202
     assert retried.json()["status"] == "QUEUED"
@@ -305,7 +347,7 @@ async def test_retry_failed_but_not_ocr_document(
         await session.commit()
     ocr_retry = await client.post(
         f"/api/assistant/v1/knowledge/documents/{document_id}/retry",
-        json={"tenantId": "tenant-a", "operatorId": "user-a"},
+        json={},
     )
     assert ocr_retry.status_code == 409
 
@@ -334,8 +376,6 @@ async def test_search_filters_other_tenant_and_includes_global(
     response = await client.post(
         "/api/assistant/v1/knowledge/search",
         json={
-            "tenantId": "tenant-a",
-            "operatorId": "user-a",
             "query": "inventory policy",
             "topK": 5,
         },
@@ -397,8 +437,6 @@ async def test_search_returns_insufficient_knowledge_below_threshold(
     response = await client.post(
         "/api/assistant/v1/knowledge/search",
         json={
-            "tenantId": "tenant-a",
-            "operatorId": "user-a",
             "query": "completely unrelated question",
             "topK": 5,
         },

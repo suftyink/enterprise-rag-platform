@@ -4,21 +4,26 @@ from enum import StrEnum
 from typing import Protocol
 from uuid import UUID
 
+from erp_assistant.identity import (
+    ActorContext,
+    IdentityAccess,
+    IdentityAction,
+    IdentityDenied,
+    IdentityMembership,
+    IdentityResource,
+    IdentityRole,
+)
 from erp_assistant.rag.document_indexer import DocumentIndexOutcome
 from erp_assistant.rag.types import (
     CleanupKind,
     CleanupStatus,
     DocumentStatus,
+    KnowledgeScope,
     PublicationStatus,
     RetentionStatus,
 )
 
-
-@dataclass(frozen=True)
-class CorpusActor:
-    subject_id: str
-    tenant_id: str
-    trusted: bool = False
+CorpusActor = ActorContext
 
 
 class CorpusProcessor(Protocol):
@@ -26,12 +31,14 @@ class CorpusProcessor(Protocol):
 
 
 class CorpusAuthorizer(Protocol):
-    def require(
+    async def require(
         self,
         actor: CorpusActor,
         operation: str,
         scope: str,
         scope_id: str,
+        resource_id: str,
+        trace_id: UUID,
     ) -> None: ...
 
 
@@ -54,18 +61,33 @@ class LifecycleAction(StrEnum):
     COMPLETE_CLEANUP = "COMPLETE_CLEANUP"
 
 
-class TrustedActorAuthorizer:
-    def require(
+class IdentityCorpusAuthorizer:
+    def __init__(self, access: IdentityAccess) -> None:
+        self._access = access
+
+    async def require(
         self,
         actor: CorpusActor,
         operation: str,
         scope: str,
         scope_id: str,
+        resource_id: str,
+        trace_id: UUID,
     ) -> None:
-        del operation
-        allowed_scope = scope == "GLOBAL" or actor.tenant_id in {scope_id, "*"}
-        if not actor.trusted or not actor.subject_id.strip() or not allowed_scope:
-            raise CorpusError("CORPUS_FORBIDDEN", "无权执行知识治理操作")
+        action = IdentityAction(operation)
+        if action is IdentityAction.PUBLISH and scope == "GLOBAL":
+            action = IdentityAction.PUBLISH_GLOBAL
+        try:
+            await self._access.authorize(
+                actor,
+                action,
+                IdentityResource(
+                    "knowledge_document", resource_id, KnowledgeScope(scope), scope_id
+                ),
+                trace_id=trace_id,
+            )
+        except IdentityDenied as exc:
+            raise CorpusError("DOCUMENT_NOT_FOUND", "文档不存在") from exc
 
 
 @dataclass(frozen=True)
@@ -138,4 +160,12 @@ class CorpusDocumentView:
         }
 
 
-SYSTEM_CORPUS_ACTOR = CorpusActor(subject_id="knowledge-index-worker", tenant_id="*", trusted=True)
+SYSTEM_CORPUS_ACTOR = ActorContext._from_membership(
+    "knowledge-index-worker",
+    IdentityMembership(
+        tenant_id="*",
+        roles=frozenset({IdentityRole.SYSTEM_ADMIN}),
+        knowledge_scopes=frozenset(),
+        internal_only=True,
+    ),
+)

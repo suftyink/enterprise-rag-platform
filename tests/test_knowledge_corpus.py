@@ -7,6 +7,7 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
+from erp_assistant.identity import IdentityRole
 from erp_assistant.infrastructure.database import Base
 from erp_assistant.models.knowledge import (
     KnowledgeChunk,
@@ -32,6 +33,13 @@ from erp_assistant.rag.types import (
     IndexJobStatus,
     RetentionStatus,
 )
+from tests.identity_factory import corpus_authorizer, trusted_actor
+
+_KnowledgeCorpus = KnowledgeCorpus
+
+
+def KnowledgeCorpus(**kwargs: object):  # type: ignore[no-redef]
+    return _KnowledgeCorpus(authorizer=corpus_authorizer(), **kwargs)
 
 
 @dataclass
@@ -354,7 +362,7 @@ async def test_untrusted_actor_is_rejected_at_the_corpus_boundary(
             CorpusActor(subject_id="employee-a", tenant_id="tenant-a"),
         )
 
-    assert raised.value.code == "CORPUS_FORBIDDEN"
+    assert raised.value.code == "DOCUMENT_NOT_FOUND"
 
 
 @pytest.mark.asyncio
@@ -421,7 +429,12 @@ def _outcome(document_id: UUID) -> DocumentIndexOutcome:
 
 
 def _actor() -> CorpusActor:
-    return CorpusActor(subject_id="reviewer-a", tenant_id="tenant-a", trusted=True)
+    return trusted_actor(
+        "reviewer-a",
+        "tenant-a",
+        roles=frozenset({IdentityRole.KNOWLEDGE_ADMIN}),
+        include_global=False,
+    )
 
 
 def _chunk(

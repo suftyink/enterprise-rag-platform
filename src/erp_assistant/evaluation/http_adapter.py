@@ -28,8 +28,6 @@ class HttpRetrievalAdapter:
             response = await self._client.post(
                 "/api/assistant/v1/knowledge/search",
                 json={
-                    "tenantId": request.actor.tenant_id,
-                    "operatorId": request.actor.subject_id,
                     "query": request.query,
                     "topK": request.evidence_limit,
                 },

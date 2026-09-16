@@ -12,14 +12,19 @@ from fastapi import (
     File,
     Form,
     HTTPException,
-    Query,
+    Request,
     Response,
     UploadFile,
     status,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from erp_assistant.api.dependencies import get_knowledge_retriever
+from erp_assistant.api.dependencies import (
+    get_current_actor,
+    get_identity_access,
+    get_knowledge_retriever,
+    request_trace_id,
+)
 from erp_assistant.api.knowledge_schemas import (
     KnowledgeDocumentResponse,
     KnowledgeRetryRequest,
@@ -29,6 +34,13 @@ from erp_assistant.api.knowledge_schemas import (
     KnowledgeSearchResult,
 )
 from erp_assistant.core.config import Settings, get_settings
+from erp_assistant.identity import (
+    ActorContext,
+    IdentityAccess,
+    IdentityAction,
+    IdentityDenied,
+    IdentityResource,
+)
 from erp_assistant.infrastructure.database import get_session
 from erp_assistant.infrastructure.object_storage import ObjectStorage, get_object_storage
 from erp_assistant.models.knowledge import KnowledgeDocument, KnowledgeIndexJob
@@ -45,9 +57,8 @@ from erp_assistant.rag.knowledge_eligibility import is_retrieval_eligible
 from erp_assistant.rag.knowledge_queries import latest_job
 from erp_assistant.rag.pdf_parser import PypdfParser
 from erp_assistant.rag.profile_bound_retriever import ProfileBoundRetriever
-from erp_assistant.rag.retriever import ActorContext, RetrievalRequest
+from erp_assistant.rag.retriever import RetrievalRequest
 from erp_assistant.rag.service import (
-    accessible_document,
     create_document,
     retry_document,
 )
@@ -178,10 +189,11 @@ def _classify_document(
     status_code=status.HTTP_202_ACCEPTED,
 )
 async def upload_document(
+    request: Request,
     response: Response,
     file: Annotated[UploadFile, File()],
-    tenant_id: Annotated[str, Form(alias="tenantId", min_length=1, max_length=64)],
-    operator_id: Annotated[str, Form(alias="operatorId", min_length=1, max_length=64)],
+    actor: Annotated[ActorContext, Depends(get_current_actor)],
+    access: Annotated[IdentityAccess, Depends(get_identity_access)],
     session: Annotated[AsyncSession, Depends(get_session)],
     settings: Annotated[Settings, Depends(get_settings)],
     storage: Annotated[ObjectStorage, Depends(get_object_storage)],
@@ -191,11 +203,14 @@ async def upload_document(
     title: Annotated[str | None, Form(max_length=255)] = None,
 ) -> KnowledgeDocumentResponse:
     _require_rag(settings)
-    if scope is KnowledgeScope.GLOBAL and (
-        not settings.allow_global_knowledge_upload
-        or operator_id not in settings.global_knowledge_operators
-    ):
-        raise _error(status.HTTP_403_FORBIDDEN, "GLOBAL_UPLOAD_FORBIDDEN", "无权上传全局知识")
+    scope_id = "GLOBAL" if scope is KnowledgeScope.GLOBAL else actor.tenant_id
+    await _authorize_or_not_found(
+        access,
+        actor,
+        IdentityAction.PUBLISH_GLOBAL if scope is KnowledgeScope.GLOBAL else IdentityAction.UPLOAD,
+        IdentityResource("knowledge_scope", scope_id, scope, scope_id),
+        request,
+    )
     content, page_count, filename, media_type = await _read_document(file, settings)
     key = _document_key(document_key, filename)
     try:
@@ -205,8 +220,8 @@ async def upload_document(
             dispatch,
             content=content,
             page_count=page_count,
-            tenant_id=tenant_id,
-            operator_id=operator_id,
+            tenant_id=actor.tenant_id,
+            operator_id=actor.subject_id,
             scope=scope,
             document_key=key,
             title=(title or Path(filename).stem)[:255],
@@ -225,15 +240,22 @@ async def upload_document(
 
 @router.get("/knowledge/documents/{document_id}", response_model=KnowledgeDocumentResponse)
 async def get_document_status(
+    request: Request,
     document_id: UUID,
-    tenant_id: Annotated[str, Query(alias="tenantId", min_length=1, max_length=64)],
-    operator_id: Annotated[str, Query(alias="operatorId", min_length=1, max_length=64)],
+    actor: Annotated[ActorContext, Depends(get_current_actor)],
+    access: Annotated[IdentityAccess, Depends(get_identity_access)],
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> KnowledgeDocumentResponse:
-    del operator_id
-    document = await accessible_document(session, document_id, tenant_id)
+    document = await session.get(KnowledgeDocument, document_id)
     if document is None:
         raise _error(status.HTTP_404_NOT_FOUND, "DOCUMENT_NOT_FOUND", "文档不存在")
+    await _authorize_or_not_found(
+        access,
+        actor,
+        IdentityAction.VIEW_DOCUMENT,
+        _identity_resource(document),
+        request,
+    )
     return _response(document, await latest_job(session, document.id))
 
 
@@ -243,16 +265,27 @@ async def get_document_status(
     status_code=status.HTTP_202_ACCEPTED,
 )
 async def retry_failed_document(
+    request: Request,
     document_id: UUID,
     payload: KnowledgeRetryRequest,
+    actor: Annotated[ActorContext, Depends(get_current_actor)],
+    access: Annotated[IdentityAccess, Depends(get_identity_access)],
     session: Annotated[AsyncSession, Depends(get_session)],
     settings: Annotated[Settings, Depends(get_settings)],
     dispatch: Annotated[DocumentDispatcher, Depends(get_document_dispatcher)],
 ) -> KnowledgeDocumentResponse:
     _require_rag(settings)
-    document = await accessible_document(session, document_id, payload.tenant_id)
+    del payload
+    document = await session.get(KnowledgeDocument, document_id)
     if document is None:
         raise _error(status.HTTP_404_NOT_FOUND, "DOCUMENT_NOT_FOUND", "文档不存在")
+    await _authorize_or_not_found(
+        access,
+        actor,
+        IdentityAction.RETRY,
+        _identity_resource(document),
+        request,
+    )
     if document.status == DocumentStatus.OCR_REQUIRED.value:
         raise _error(status.HTTP_409_CONFLICT, "OCR_NOT_AVAILABLE", "当前阶段尚未支持 OCR")
     try:
@@ -266,19 +299,28 @@ async def retry_failed_document(
 
 @router.post("/knowledge/search", response_model=KnowledgeSearchResponse)
 async def search_documents(
+    request: Request,
     payload: KnowledgeSearchRequest,
+    actor: Annotated[ActorContext, Depends(get_current_actor)],
+    access: Annotated[IdentityAccess, Depends(get_identity_access)],
     settings: Annotated[Settings, Depends(get_settings)],
     retriever: Annotated[ProfileBoundRetriever, Depends(get_knowledge_retriever)],
 ) -> KnowledgeSearchResponse:
     _require_rag(settings)
+    await _authorize_or_not_found(
+        access,
+        actor,
+        IdentityAction.SEARCH,
+        IdentityResource(
+            "knowledge_scope", actor.tenant_id, KnowledgeScope.TENANT, actor.tenant_id
+        ),
+        request,
+    )
     try:
         outcome = await retriever.retrieve(
             RetrievalRequest(
                 query=payload.query,
-                actor=ActorContext(
-                    subject_id=payload.operator_id,
-                    tenant_id=payload.tenant_id,
-                ),
+                actor=actor,
                 evidence_limit=payload.top_k,
             )
         )
@@ -336,3 +378,30 @@ async def search_documents(
             for evidence in outcome.evidence
         ],
     )
+
+
+def _identity_resource(document: KnowledgeDocument) -> IdentityResource:
+    return IdentityResource(
+        resource_type="knowledge_document",
+        resource_id=str(document.id),
+        scope=KnowledgeScope(document.scope),
+        scope_id=document.scope_id,
+    )
+
+
+async def _authorize_or_not_found(
+    access: IdentityAccess,
+    actor: ActorContext,
+    action: IdentityAction,
+    resource: IdentityResource,
+    request: Request,
+) -> None:
+    try:
+        await access.authorize(
+            actor,
+            action,
+            resource,
+            trace_id=request_trace_id(request),
+        )
+    except IdentityDenied as exc:
+        raise _error(status.HTTP_404_NOT_FOUND, exc.code, exc.message) from exc

@@ -26,6 +26,13 @@ from erp_assistant.rag.types import (
     DocumentStatus,
     RetentionStatus,
 )
+from tests.identity_factory import corpus_authorizer
+
+_KnowledgeCorpus = KnowledgeCorpus
+
+
+def KnowledgeCorpus(**kwargs: object):  # type: ignore[no-redef]
+    return _KnowledgeCorpus(authorizer=corpus_authorizer(), **kwargs)
 
 
 class UnusedProcessor:

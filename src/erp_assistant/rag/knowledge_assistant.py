@@ -15,7 +15,7 @@ from erp_assistant.orchestration.providers import (
     ProviderBoundary,
 )
 from erp_assistant.rag.answer_feedback_store import AnswerFeedbackStore
-from erp_assistant.rag.errors import RagDependencyError
+from erp_assistant.rag.errors import RagDependencyError, RagError
 from erp_assistant.rag.knowledge_eligibility import retrieval_eligibility_filters
 from erp_assistant.rag.retriever import (
     ActorContext,
@@ -128,6 +128,8 @@ class KnowledgeAssistant:
         self._context_token_budget = context_token_budget
 
     async def ask(self, request: AnswerRequest) -> AnswerOutcome:
+        if not request.actor.is_trusted:
+            raise RagError("UNTRUSTED_ACTOR", "回答请求缺少可信身份")
         retrieval = await self._retriever.retrieve(
             RetrievalRequest(
                 query=request.question,
@@ -296,6 +298,8 @@ class KnowledgeAssistant:
         )
 
     async def submit_feedback(self, request: FeedbackRequest) -> FeedbackReceipt:
+        if not request.actor.is_trusted:
+            raise RagError("UNTRUSTED_ACTOR", "反馈请求缺少可信身份")
         reason = request.reason.strip() if request.reason else None
         if reason is not None and (not reason or len(reason) > 500):
             raise ValueError("Feedback reason is invalid")

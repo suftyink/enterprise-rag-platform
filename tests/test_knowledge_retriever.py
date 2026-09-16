@@ -17,9 +17,10 @@ from erp_assistant.orchestration.fake_providers import (
 from erp_assistant.orchestration.providers import RankedDocument
 from erp_assistant.rag.chunker import ChunkDraft
 from erp_assistant.rag.errors import RagDependencyError, RagError
-from erp_assistant.rag.retriever import ActorContext, KnowledgeRetriever, RetrievalRequest
+from erp_assistant.rag.retriever import KnowledgeRetriever, RetrievalRequest
 from erp_assistant.rag.types import DocumentStatus, SearchDecision
 from erp_assistant.rag.vector_store import MilvusVectorStore, VectorHit
+from tests.identity_factory import trusted_actor as ActorContext
 
 
 @dataclass

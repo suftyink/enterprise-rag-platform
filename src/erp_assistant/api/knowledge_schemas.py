@@ -49,10 +49,7 @@ class KnowledgeDocumentResponse(BaseModel):
 
 
 class KnowledgeRetryRequest(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
-
-    tenant_id: str = Field(alias="tenantId", min_length=1, max_length=64)
-    operator_id: str = Field(alias="operatorId", min_length=1, max_length=64)
+    model_config = ConfigDict(extra="forbid")
 
 
 class KnowledgeSearchRequest(KnowledgeRetryRequest):
