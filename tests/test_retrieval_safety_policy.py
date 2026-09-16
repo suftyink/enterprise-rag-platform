@@ -1,3 +1,4 @@
+from copy import deepcopy
 from hashlib import sha256
 
 import pytest
@@ -115,6 +116,41 @@ def test_runtime_registry_prevalidates_every_route_before_allocating_clients() -
     before = len(provider_factory._http_clients)
 
     with pytest.raises(ValueError, match="trusted host registry"):
+        build_retrieval_runtime_registry(settings)
+
+    assert len(provider_factory._http_clients) == before
+
+
+def test_runtime_registry_rejects_exact_key_collision_before_allocating_clients() -> None:
+    deployment = {
+        "data_classification": "ORDINARY",
+        "provider_boundary": "CLOUD",
+        "parser_version": "parser-v1",
+        "chunk_version": "chunk-v1",
+        "embedding": {
+            "base_url": "https://cloud-model.example/v1",
+            "deployment": "cloud-embed-v1",
+            "model": "semantic-embed",
+            "version": "v1",
+            "dimension": 3,
+        },
+        "reranker": {
+            "base_url": "https://cloud-model.example/v1",
+            "deployment": "cloud-rerank-v1",
+            "model": "semantic-rerank",
+            "version": "v1",
+        },
+        "vector_index": {
+            "uri": "http://milvus.internal:19530",
+            "collection": "ordinary-staging-v1",
+        },
+    }
+    duplicate = deepcopy(deployment)
+    duplicate["embedding"]["base_url"] = "https://other-cloud.example/v1"  # type: ignore[index]
+    settings = Settings(retrieval_runtime_deployments=[deployment, duplicate])
+    before = len(provider_factory._http_clients)
+
+    with pytest.raises(ValueError, match="Duplicate retrieval runtime binding"):
         build_retrieval_runtime_registry(settings)
 
     assert len(provider_factory._http_clients) == before

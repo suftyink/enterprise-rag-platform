@@ -80,6 +80,7 @@ class EvaluationEnvironment:
     index_identity: str
     parser_version: str
     chunk_version: str
+    index_build_hash: str | None = None
     thresholds: "QualityThresholds" = field(default_factory=lambda: QualityThresholds())
 
     def __post_init__(self) -> None:
@@ -136,6 +137,7 @@ class EvaluationMetadata:
     comparison_key: str
     executed_at: str
     elapsed_ms: float
+    index_build_hash: str | None = None
     routes: tuple["EvaluationRoute", ...] = ()
 
 
@@ -197,6 +199,7 @@ class EvaluationReport:
                 "indexIdentity": self.metadata.index_identity,
                 "parserVersion": self.metadata.parser_version,
                 "chunkVersion": self.metadata.chunk_version,
+                "indexBuildHash": self.metadata.index_build_hash,
                 "retrievalPipeline": self.metadata.retrieval_pipeline,
                 "embeddingModel": self.metadata.embedding_model,
                 "rerankModel": self.metadata.rerank_model,

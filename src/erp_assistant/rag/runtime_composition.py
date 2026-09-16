@@ -1,4 +1,6 @@
+from dataclasses import dataclass
 from functools import lru_cache
+from typing import cast
 
 from erp_assistant.core.config import (
     RetrievalRuntimeDeploymentSettings,
@@ -13,7 +15,16 @@ from erp_assistant.orchestration.provider_factory import (
     create_retrieval_http_client,
     validate_restricted_provider_url,
 )
-from erp_assistant.orchestration.providers import ProviderBoundary, embedding_binding_fingerprint
+from erp_assistant.orchestration.providers import (
+    EmbeddingProvider,
+    ProviderBoundary,
+    RerankProvider,
+    embedding_binding_fingerprint,
+)
+from erp_assistant.rag.retriever import (
+    retrieval_configuration,
+    retrieval_configuration_fingerprint,
+)
 from erp_assistant.rag.runtime_registry import (
     RetrievalRuntimeBinding,
     RetrievalRuntimeRegistry,
@@ -72,7 +83,7 @@ def build_retrieval_runtime_registry(settings: Settings) -> RetrievalRuntimeRegi
 
 
 def _validate_runtime_deployments(settings: Settings) -> None:
-    identities: set[tuple[object, ...]] = set()
+    registry_keys: set[tuple[str, str, str, str, str]] = set()
     index_snapshots: dict[tuple[str, str], tuple[object, ...]] = {}
     for deployment in settings.retrieval_runtime_deployments:
         classification = DataClassification(deployment.data_classification)
@@ -91,31 +102,10 @@ def _validate_runtime_deployments(settings: Settings) -> None:
             >= runtime_settings.knowledge_chunk_target
         ):
             raise ValueError("Runtime deployment chunk configuration is invalid")
-        identity = (
-            classification,
-            boundary,
-            deployment.parser_version,
-            deployment.chunk_version,
-            deployment.embedding.deployment,
-            deployment.embedding.model,
-            deployment.embedding.version,
-            deployment.embedding.dimension,
-            deployment.reranker.deployment,
-            deployment.reranker.model,
-            deployment.reranker.version,
-            deployment.vector_index.uri,
-            deployment.vector_index.collection,
-            deployment.rrf_k,
-            deployment.candidate_multiplier,
-            deployment.max_candidates,
-            deployment.rerank_threshold,
-            runtime_settings.knowledge_chunk_target,
-            runtime_settings.knowledge_chunk_max,
-            runtime_settings.knowledge_chunk_overlap,
-        )
-        if identity in identities:
+        registry_key = _deployment_registry_key(settings, deployment)
+        if registry_key in registry_keys:
             raise ValueError("Duplicate retrieval runtime binding")
-        identities.add(identity)
+        registry_keys.add(registry_key)
         index_key = (
             deployment.vector_index.uri,
             deployment.vector_index.collection,
@@ -132,6 +122,64 @@ def _validate_runtime_deployments(settings: Settings) -> None:
         existing_snapshot = index_snapshots.setdefault(index_key, snapshot_identity)
         if existing_snapshot != snapshot_identity:
             raise ValueError("Indexing changes require an independent vector collection")
+
+
+@dataclass(frozen=True)
+class _EmbeddingIdentity:
+    deployment: str
+    model: str
+    version: str
+    dimension: int
+    boundary: ProviderBoundary
+
+
+@dataclass(frozen=True)
+class _RerankIdentity:
+    deployment: str
+    model: str
+    version: str
+    boundary: ProviderBoundary
+
+
+def _deployment_registry_key(
+    settings: Settings,
+    deployment: RetrievalRuntimeDeploymentSettings,
+) -> tuple[str, str, str, str, str]:
+    boundary = ProviderBoundary(deployment.provider_boundary)
+    embedding = _EmbeddingIdentity(
+        deployment=deployment.embedding.deployment,
+        model=f"{deployment.embedding.model}:{deployment.embedding.version}",
+        version=deployment.embedding.version,
+        dimension=deployment.embedding.dimension,
+        boundary=boundary,
+    )
+    reranker = _RerankIdentity(
+        deployment=deployment.reranker.deployment,
+        model=f"{deployment.reranker.model}:{deployment.reranker.version}",
+        version=deployment.reranker.version,
+        boundary=boundary,
+    )
+    embedding_provider = cast(EmbeddingProvider, embedding)
+    rerank_provider = cast(RerankProvider, reranker)
+    vector_store = MilvusVectorStore(
+        uri=deployment.vector_index.uri,
+        collection=deployment.vector_index.collection,
+        dimension=embedding.dimension,
+        embedding_binding=embedding_binding_fingerprint(embedding_provider),
+    )
+    config = retrieval_configuration(
+        settings=_runtime_settings(settings, deployment),
+        vector_store=vector_store,
+        embedding=embedding_provider,
+        reranker=rerank_provider,
+    )
+    return (
+        deployment.data_classification,
+        vector_store.identity,
+        retrieval_configuration_fingerprint(config),
+        deployment.parser_version,
+        deployment.chunk_version,
+    )
 
 
 def _provider_urls(

@@ -96,6 +96,24 @@ class KnowledgeDocument(Base):
     jobs: Mapped[list["KnowledgeIndexJob"]] = relationship(
         back_populates="document", cascade="all, delete-orphan"
     )
+    vector_artifacts: Mapped[list["KnowledgeVectorArtifact"]] = relationship(
+        back_populates="document", cascade="all, delete-orphan"
+    )
+
+
+class KnowledgeVectorArtifact(Base):
+    __tablename__ = "knowledge_vector_artifact"
+
+    document_id: Mapped[UUID] = mapped_column(
+        ForeignKey("knowledge_document.id", ondelete="CASCADE"), primary_key=True
+    )
+    index_identity: Mapped[str] = mapped_column(String(255), primary_key=True)
+    vector_document_id: Mapped[UUID] = mapped_column(Uuid, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+    document: Mapped[KnowledgeDocument] = relationship(back_populates="vector_artifacts")
 
 
 class KnowledgeChunk(Base):
@@ -195,6 +213,16 @@ class KnowledgeCorpusHead(Base):
     )
 
 
+class KnowledgeCorpusGeneration(Base):
+    __tablename__ = "knowledge_corpus_generation"
+
+    data_classification: Mapped[str] = mapped_column(String(32), primary_key=True)
+    generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
 class KnowledgeLifecycleEvent(Base):
     __tablename__ = "knowledge_lifecycle_event"
     __table_args__ = (Index("ix_knowledge_lifecycle_event_document", "document_id", "created_at"),)
@@ -244,6 +272,10 @@ class RetrievalProfileRecord(Base):
     )
     configuration_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     production_ready: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    index_build_hash: Mapped[str | None] = mapped_column(String(64))
+    index_build_corpus_hash: Mapped[str | None] = mapped_column(String(64))
+    index_build_document_count: Mapped[int | None] = mapped_column(Integer)
+    index_build_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="STAGING")
     dataset_hash: Mapped[str | None] = mapped_column(String(64))
     comparison_key: Mapped[str | None] = mapped_column(String(64))

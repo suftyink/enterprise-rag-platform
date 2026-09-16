@@ -13,6 +13,7 @@ from erp_assistant.models.knowledge import (
     KnowledgeLifecycleEvent,
 )
 from erp_assistant.rag._knowledge_lifecycle import apply_transition
+from erp_assistant.rag.corpus_generation import lock_corpus_generation
 from erp_assistant.rag.document_indexer import IndexDecision
 from erp_assistant.rag.knowledge_corpus_contracts import (
     SYSTEM_CORPUS_ACTOR,
@@ -32,6 +33,7 @@ from erp_assistant.rag.knowledge_queries import latest_job
 from erp_assistant.rag.types import (
     CleanupKind,
     CleanupStatus,
+    DataClassification,
     DocumentStatus,
     IndexJobStatus,
     PublicationStatus,
@@ -175,7 +177,11 @@ class KnowledgeCorpus:
     ) -> None:
         async with self._sessions() as session:
             async with session.begin():
-                document = await session.get(KnowledgeDocument, document_id)
+                document = await session.scalar(
+                    select(KnowledgeDocument)
+                    .where(KnowledgeDocument.id == document_id)
+                    .with_for_update()
+                )
                 if document is None:
                     raise CorpusError("DOCUMENT_NOT_FOUND", "文档不存在")
                 head = await self._head(session, document, for_update=True)
@@ -192,9 +198,14 @@ class KnowledgeCorpus:
                         "STALE_CORPUS_REVISION",
                         f"知识修订已变化，当前为 {head.revision}",
                     )
+                generation = await lock_corpus_generation(
+                    session,
+                    DataClassification(document.data_classification),
+                )
                 await apply_transition(session, head, document, action, reason)
                 head.revision += 1
                 document.governance_revision = head.revision
+                generation.generation += 1
                 session.add(
                     KnowledgeLifecycleEvent(
                         document_id=document.id,

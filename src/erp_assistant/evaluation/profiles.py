@@ -11,7 +11,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from erp_assistant.evaluation.models import EvaluationReport, GateDecision
 from erp_assistant.models.knowledge import RetrievalProfileRecord
 from erp_assistant.orchestration.providers import ProviderBoundary
+from erp_assistant.rag.corpus_generation import lock_corpus_generation
 from erp_assistant.rag.errors import RagError
+from erp_assistant.rag.index_manifest import build_manifest, capture_corpus_snapshot
 from erp_assistant.rag.retriever import retrieval_configuration_fingerprint
 from erp_assistant.rag.types import DataClassification
 
@@ -131,6 +133,26 @@ class SqlRetrievalProfileStore:
             if candidate is None:
                 raise RagError("PROFILE_NOT_FOUND", "staging Profile 不存在")
             self._validate_evidence(candidate, report)
+            try:
+                classification = DataClassification(candidate.data_classification)
+            except ValueError as exc:
+                raise RagError(
+                    "INVALID_RETRIEVAL_PROFILE", "检索 Profile 数据分类无效"
+                ) from exc
+            await lock_corpus_generation(session, classification)
+            snapshot = await capture_corpus_snapshot(session, classification)
+            expected_manifest = build_manifest(candidate, snapshot)
+            if (
+                candidate.index_build_hash is None
+                or candidate.index_build_hash != expected_manifest.build_hash
+                or candidate.index_build_corpus_hash != snapshot.corpus_hash
+                or candidate.index_build_document_count != snapshot.document_count
+                or not snapshot.document_count
+            ):
+                raise RagError(
+                    "PROFILE_INDEX_BUILD_STALE",
+                    "候选 Profile 缺少当前语料的完整 staging 构建证明",
+                )
             if self._runtime_binding_validator is None or not self._runtime_binding_validator(
                 candidate
             ):
@@ -165,6 +187,11 @@ class SqlRetrievalProfileStore:
                     "PROFILE_DATASET_MISMATCH", "候选 Profile 必须使用与活动版本相同的数据集"
                 )
             if active is not None and active.id != candidate.id:
+                if active.index_identity == candidate.index_identity:
+                    raise RagError(
+                        "STAGING_INDEX_NOT_INDEPENDENT",
+                        "候选 Profile 必须使用独立于活动版本的向量索引",
+                    )
                 active.status = ProfileStatus.ROLLBACK.value
                 await session.flush()
             candidate.previous_profile_id = (
@@ -209,6 +236,8 @@ class SqlRetrievalProfileStore:
             and route.retrieval_config == candidate.retrieval_config
             and candidate.configuration_fingerprint
             == retrieval_configuration_fingerprint(candidate.retrieval_config)
+            and candidate.index_build_hash is not None
+            and report.metadata.index_build_hash == candidate.index_build_hash
         )
         if not matches:
             raise RagError("PROFILE_EVIDENCE_MISMATCH", "评测证据与 staging Profile 不匹配")

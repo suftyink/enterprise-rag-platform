@@ -20,6 +20,7 @@ from erp_assistant.models.knowledge import (
     KnowledgeChunk,
     KnowledgeDocument,
     KnowledgeIndexJob,
+    KnowledgeVectorArtifact,
 )
 from erp_assistant.orchestration.fake_providers import FakeEmbeddingProvider
 from erp_assistant.orchestration.providers import EmbeddingProvider
@@ -303,6 +304,33 @@ async def test_index_markdown_preserves_structure_identifiers_and_versions(
     parsed = json.loads(storage.objects[parsed_key])
     assert parsed["blocks"][0]["kind"] == "HEADING"
     assert parsed["blocks"][0]["locator"]["headingPath"] == ["Fulfillment Guide"]
+
+
+@pytest.mark.asyncio
+async def test_index_skips_document_after_governance_makes_it_ineligible(
+    indexer_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    storage = MemoryStorage()
+    vectors = MemoryVectorWriter()
+    document = await _add_document(
+        indexer_factory,
+        storage,
+        version=1,
+        content=make_pdf("Withdrawn document must not be indexed."),
+        status=DocumentStatus.QUEUED,
+        active=False,
+    )
+    async with indexer_factory() as session:
+        stored = await session.get_one(KnowledgeDocument, document.id)
+        stored.publication_status = "WITHDRAWN"
+        stored.governance_revision = 1
+        await session.commit()
+
+    outcome = await _indexer(indexer_factory, storage, vectors).index(document.id)
+
+    assert outcome.decision is IndexDecision.SKIPPED
+    assert outcome.error_code == "GOVERNANCE_NOT_INDEXABLE"
+    assert vectors.upsert_count == 0
 
 
 @pytest.mark.asyncio
@@ -917,7 +945,9 @@ async def test_index_atomically_claims_duplicate_deliveries(
     assert [outcome.decision for outcome in outcomes].count(
         IndexDecision.INDEXED_FOR_CURRENT_POLICY
     ) == 1
-    assert [outcome.decision for outcome in outcomes].count(IndexDecision.SKIPPED) == 1
+    assert [outcome.decision for outcome in outcomes].count(
+        IndexDecision.CONCURRENT_INDEXING
+    ) == 1
     assert vectors.upsert_count == 1
 
 
@@ -985,7 +1015,7 @@ async def test_expired_worker_is_fenced_before_vector_write_after_takeover(
 
     assert takeover.decision == IndexDecision.INDEXED_FOR_CURRENT_POLICY
     assert takeover.attempt == 2
-    assert stale.decision == IndexDecision.SKIPPED
+    assert stale.decision == IndexDecision.CONCURRENT_INDEXING
     assert stale.attempt == 2
     assert vectors.upsert_count == 1
 
@@ -1382,6 +1412,91 @@ async def test_reindex_uses_indexer_pipeline_revision_and_reports_idempotent_rep
     assert second.skipped_count == 1
     assert second.chunk_count == first.chunk_count
     assert replacement_vectors.upsert_count == 1
+
+
+@pytest.mark.asyncio
+async def test_reindex_reports_concurrent_lease_as_incomplete(
+    indexer_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    storage = MemoryStorage()
+    vectors = MemoryVectorWriter(identity="memory-index-v1")
+    document = await _add_document(
+        indexer_factory,
+        storage,
+        version=1,
+        content=make_pdf(["Active inventory policy content. " * 8]),
+        status=DocumentStatus.READY,
+        active=True,
+    )
+    async with indexer_factory() as session:
+        job = await session.scalar(
+            select(KnowledgeIndexJob).where(KnowledgeIndexJob.document_id == document.id)
+        )
+        if job is None:
+            job = KnowledgeIndexJob(
+                document_id=document.id,
+                status=IndexJobStatus.RUNNING.value,
+                phase=DocumentStatus.READY.value,
+                lease_expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            )
+            session.add(job)
+        else:
+            job.status = IndexJobStatus.RUNNING.value
+            job.lease_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+        await session.commit()
+
+    result = await reindex_active_documents(
+        _indexer(indexer_factory, storage, vectors),
+        indexer_factory,
+    )
+
+    assert result.concurrent_indexing_count == 1
+    assert result.skipped_count == 0
+
+
+@pytest.mark.asyncio
+async def test_reindex_tracks_and_replaces_vector_artifacts_per_index_snapshot(
+    indexer_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    storage = MemoryStorage()
+    first_vectors = MemoryVectorWriter(identity="memory-index-v1")
+    second_vectors = MemoryVectorWriter(identity="memory-index-v2")
+    document = await _add_document(
+        indexer_factory,
+        storage,
+        version=1,
+        content=make_pdf(["Versioned inventory policy content. " * 8]),
+        status=DocumentStatus.QUEUED,
+        active=True,
+    )
+
+    first_outcome = await _indexer(indexer_factory, storage, first_vectors).index(document.id)
+    async with indexer_factory() as session:
+        first_artifact_id = await session.scalar(
+            select(KnowledgeVectorArtifact.vector_document_id).where(
+                KnowledgeVectorArtifact.document_id == document.id,
+                KnowledgeVectorArtifact.index_identity == first_vectors.identity,
+            )
+        )
+    await _indexer(indexer_factory, storage, second_vectors).index(document.id)
+    await _indexer(indexer_factory, storage, first_vectors).index(document.id)
+
+    async with indexer_factory() as session:
+        artifacts = list(
+            (
+                await session.scalars(
+                    select(KnowledgeVectorArtifact).where(
+                        KnowledgeVectorArtifact.document_id == document.id
+                    )
+                )
+            ).all()
+        )
+    assert {artifact.index_identity for artifact in artifacts} == {
+        first_vectors.identity,
+        second_vectors.identity,
+    }
+    assert first_artifact_id in first_vectors.deleted
+    assert first_outcome.document_id == document.id
 
 
 @pytest.mark.asyncio

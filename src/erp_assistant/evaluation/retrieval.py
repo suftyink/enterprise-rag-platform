@@ -155,6 +155,7 @@ class RetrievalEvaluator:
                 index_identity=self._environment.index_identity,
                 parser_version=self._environment.parser_version,
                 chunk_version=self._environment.chunk_version,
+                index_build_hash=self._environment.index_build_hash,
                 retrieval_pipeline=primary_run.retrieval if primary_run else None,
                 embedding_model=primary_run.embedding_model if primary_run else None,
                 rerank_model=primary_run.rerank_model if primary_run else None,
@@ -255,6 +256,7 @@ def _comparison_key(
             "datasetHash": dataset_hash,
             "datasetVersion": dataset_version,
             "indexIdentity": environment.index_identity,
+            "indexBuildHash": environment.index_build_hash,
             "parserVersion": environment.parser_version,
             "thresholds": {
                 "latencyP95Ms": environment.thresholds.latency_p95_ms,
@@ -366,6 +368,7 @@ async def evaluate_candidate_profile(
             index_identity=candidate.index_identity,
             parser_version=candidate.parser_version,
             chunk_version=candidate.chunk_version,
+            index_build_hash=candidate.index_build_hash,
         )
         activator = SqlRetrievalProfileStore(
             SessionFactory,

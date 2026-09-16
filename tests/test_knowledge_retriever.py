@@ -453,6 +453,8 @@ async def test_retrieve_uses_dense_and_bm25_rrf_through_the_milvus_adapter(
 
 def test_milvus_adapter_namespaces_vector_rows_but_returns_source_chunk_id() -> None:
     chunk_id = uuid4()
+    first_document_id = uuid4()
+    second_document_id = uuid4()
     client = RecordingMilvusClient(chunk_id)
     vector_store = StubMilvusVectorStore(client)
     chunk = ChunkDraft(
@@ -465,8 +467,12 @@ def test_milvus_adapter_namespaces_vector_rows_but_returns_source_chunk_id() -> 
         content_hash="a" * 64,
     )
 
-    vector_store.upsert_document(uuid4(), "TENANT", "tenant-a", 1, [chunk], [[0.1]])
-    vector_store.upsert_document(uuid4(), "TENANT", "tenant-a", 1, [chunk], [[0.1]])
+    vector_store.upsert_document(
+        first_document_id, "TENANT", "tenant-a", 1, [chunk], [[0.1]]
+    )
+    vector_store.upsert_document(
+        second_document_id, "TENANT", "tenant-a", 1, [chunk], [[0.1]]
+    )
 
     assert len(client.upsert_rows) == 2
     assert client.upsert_rows[0]["id"] != client.upsert_rows[1]["id"]

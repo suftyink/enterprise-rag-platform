@@ -49,7 +49,10 @@ class KnowledgeCleanupExecutor:
         session_factory: async_sessionmaker[AsyncSession],
         storage: ObjectStorage,
         vectors: VectorWriter,
-        vectors_by_classification: dict[DataClassification, VectorWriter] | None = None,
+        vectors_by_classification: dict[
+            DataClassification, VectorWriter | tuple[VectorWriter, ...]
+        ]
+        | None = None,
         corpus: KnowledgeCorpus,
     ) -> None:
         self._sessions = session_factory
@@ -63,13 +66,26 @@ class KnowledgeCleanupExecutor:
         if request is None:
             return CleanupOutcome(document_id, CleanupDecision.SKIPPED, None)
         try:
-            vectors = await self._vector_writer(document_id)
+            vectors = await self._vector_writers(document_id)
             for artifact in request.artifacts:
                 if artifact["kind"] == "vector_document":
-                    await asyncio.to_thread(
-                        vectors.delete_document,
-                        UUID(artifact["document_id"]),
-                    )
+                    index_identity = artifact.get("index_identity")
+                    if index_identity is not None:
+                        try:
+                            selected_writers: tuple[VectorWriter, ...] = (
+                                vectors[index_identity],
+                            )
+                        except KeyError as exc:
+                            raise CleanupRetryableError(
+                                f"向量索引 {index_identity} 没有可用的精确清理路由"
+                            ) from exc
+                    else:
+                        selected_writers = tuple(vectors.values())
+                    for writer in selected_writers:
+                        await asyncio.to_thread(
+                            writer.delete_document,
+                            UUID(artifact["document_id"]),
+                        )
                 elif artifact["kind"] == "object":
                     await asyncio.to_thread(
                         self._storage.delete_object,
@@ -88,9 +104,9 @@ class KnowledgeCleanupExecutor:
             raise CleanupRetryableError("知识产物清理失败，可安全重试") from exc
         return CleanupOutcome(document_id, CleanupDecision.COMPLETED, request.id)
 
-    async def _vector_writer(self, document_id: UUID) -> VectorWriter:
+    async def _vector_writers(self, document_id: UUID) -> dict[str, VectorWriter]:
         if not self._classified_vectors:
-            return self._vectors
+            return {self._vectors.identity: self._vectors}
         async with self._sessions() as session:
             classification = await session.scalar(
                 select(KnowledgeDocument.data_classification).where(
@@ -100,10 +116,11 @@ class KnowledgeCleanupExecutor:
         if classification is None:
             raise CleanupRetryableError("清理目标文档不存在")
         try:
-            writer = self._classified_vectors[DataClassification(classification)]
+            configured = self._classified_vectors[DataClassification(classification)]
         except (KeyError, ValueError) as exc:
             raise CleanupRetryableError("文档分类没有对应的向量清理路由") from exc
-        return writer
+        writers = configured if isinstance(configured, tuple) else (configured,)
+        return {writer.identity: writer for writer in writers}
 
     async def _claim(self, document_id: UUID) -> KnowledgeCleanupRequest | None:
         async with self._sessions() as session:

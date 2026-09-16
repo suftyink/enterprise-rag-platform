@@ -122,4 +122,5 @@ def environment(**changes: str) -> EvaluationEnvironment:
         index_identity=values["index_identity"],
         parser_version=values["parser_version"],
         chunk_version=values["chunk_version"],
+        index_build_hash=values.get("index_build_hash"),
     )

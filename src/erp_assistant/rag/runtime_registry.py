@@ -79,11 +79,13 @@ class RetrievalRuntimeBinding:
         return retrieval_configuration_fingerprint(self.retrieval_config)
 
     @property
-    def registry_key(self) -> tuple[str, str, str]:
+    def registry_key(self) -> tuple[str, str, str, str, str]:
         return (
             self.data_classification.value,
             self.vector_store.identity,
             self.configuration_fingerprint,
+            self.parser_version,
+            self.chunk_version,
         )
 
     def matches(self, profile: RetrievalProfileRecord) -> bool:
@@ -120,7 +122,7 @@ class RetrievalRuntimeRegistry:
     """Resolves only bindings approved during process composition."""
 
     def __init__(self, bindings: Iterable[RetrievalRuntimeBinding]) -> None:
-        self._bindings: dict[tuple[str, str, str], RetrievalRuntimeBinding] = {}
+        self._bindings: dict[tuple[str, str, str, str, str], RetrievalRuntimeBinding] = {}
         for binding in bindings:
             if binding.registry_key in self._bindings:
                 raise ValueError("Duplicate retrieval runtime binding")
@@ -146,10 +148,19 @@ class RetrievalRuntimeRegistry:
             )
         return binding
 
+    def vector_stores_for(self, classification: DataClassification) -> tuple[VectorStore, ...]:
+        stores: dict[str, VectorStore] = {}
+        for binding in self._bindings.values():
+            if binding.data_classification is classification:
+                stores.setdefault(binding.vector_store.identity, binding.vector_store)
+        return tuple(stores.values())
+
     @staticmethod
-    def _profile_key(profile: RetrievalProfileRecord) -> tuple[str, str, str]:
+    def _profile_key(profile: RetrievalProfileRecord) -> tuple[str, str, str, str, str]:
         return (
             profile.data_classification,
             profile.index_identity,
             profile.configuration_fingerprint,
+            profile.parser_version,
+            profile.chunk_version,
         )

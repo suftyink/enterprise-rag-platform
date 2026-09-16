@@ -1,6 +1,7 @@
 import json
 from collections.abc import AsyncIterator
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -37,6 +38,11 @@ from erp_assistant.orchestration.http_retrieval_providers import (
 from erp_assistant.orchestration.providers import ProviderBoundary
 from erp_assistant.rag.chunker import ChunkDraft
 from erp_assistant.rag.classified_retriever import ClassifiedRetrieverRouter
+from erp_assistant.rag.index_manifest import (
+    IndexBuildManifest,
+    build_manifest,
+    capture_corpus_snapshot,
+)
 from erp_assistant.rag.profile_bound_retriever import ProfileBoundRetriever
 from erp_assistant.rag.retriever import (
     KnowledgeRetriever,
@@ -116,6 +122,23 @@ class FailIfCalledActivator:
         raise AssertionError("A profile that missed a gate must not be activated")
 
 
+class ProfileStoreHarness(SqlRetrievalProfileStore):
+    async def record_completed_test_build(self, profile_id: UUID) -> IndexBuildManifest:
+        async with self._sessions() as session:
+            profile = await session.get_one(RetrievalProfileRecord, profile_id)
+            snapshot = await capture_corpus_snapshot(
+                session,
+                DataClassification(profile.data_classification),
+            )
+            manifest = build_manifest(profile, snapshot)
+            profile.index_build_hash = manifest.build_hash
+            profile.index_build_corpus_hash = manifest.corpus_hash
+            profile.index_build_document_count = manifest.document_count
+            profile.index_build_completed_at = datetime.now(UTC)
+            await session.commit()
+            return manifest
+
+
 @pytest_asyncio.fixture
 async def retrieval_session() -> AsyncIterator[AsyncSession]:
     engine = create_async_engine(
@@ -180,7 +203,7 @@ async def retrieval_session() -> AsyncIterator[AsyncSession]:
 
 
 @pytest_asyncio.fixture
-async def profile_store() -> AsyncIterator[SqlRetrievalProfileStore]:
+async def profile_store() -> AsyncIterator[ProfileStoreHarness]:
     engine = create_async_engine(
         "sqlite+aiosqlite://",
         poolclass=StaticPool,
@@ -189,7 +212,31 @@ async def profile_store() -> AsyncIterator[SqlRetrievalProfileStore]:
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    yield SqlRetrievalProfileStore(
+    async with factory() as session:
+        session.add(
+            KnowledgeDocument(
+                scope="TENANT",
+                scope_id="tenant-a",
+                tenant_id="tenant-a",
+                document_key="approved-sop",
+                version=1,
+                title="Approved SOP",
+                original_filename="approved.pdf",
+                media_type="application/pdf",
+                data_classification=DataClassification.ORDINARY.value,
+                size_bytes=100,
+                sha256="d" * 64,
+                object_key="knowledge/approved/original.pdf",
+                status="READY",
+                active=True,
+                publication_status="PUBLISHED",
+                retention_status="RETAINED",
+                index_artifacts_present=True,
+                created_by="test-author",
+            )
+        )
+        await session.commit()
+    yield ProfileStoreHarness(
         factory, runtime_binding_validator=lambda profile: bool(profile.id)
     )
     await engine.dispose()
@@ -859,7 +906,7 @@ def _passing_business_scenario() -> tuple[list[dict[str, object]], dict[str, Ret
 @pytest.mark.asyncio
 async def test_run_activates_only_passing_staging_profiles_and_supports_rollback(
     tmp_path: Path,
-    profile_store: SqlRetrievalProfileStore,
+    profile_store: ProfileStoreHarness,
 ) -> None:
     cases, raw_outcomes = _passing_business_scenario()
     outcomes = {key: value for key, value in raw_outcomes.items()}
@@ -897,12 +944,14 @@ async def test_run_activates_only_passing_staging_profiles_and_supports_rollback
     await profile_store.stage(second)
 
     async def evaluate(candidate: RetrievalProfile) -> EvaluationReport:
+        manifest = await profile_store.record_completed_test_build(candidate.id)
         return await RetrievalEvaluator(
             DeterministicRetriever(outcomes),
             environment(
                 index_identity=candidate.index_identity,
                 parser_version=candidate.parser_version,
                 chunk_version=candidate.chunk_version,
+                index_build_hash=manifest.build_hash,
             ),
             activator=profile_store,
             candidate_profile_id=candidate.id,
@@ -912,7 +961,7 @@ async def test_run_activates_only_passing_staging_profiles_and_supports_rollback
     second_report = await evaluate(second)
     rollback_report = await evaluate(first)
 
-    assert first_report.activation is not None
+    assert first_report.activation is not None, first_report.failures
     assert first_report.activation.previous_profile_id is None
     assert second_report.activation is not None
     assert second_report.activation.previous_profile_id == str(first_id)
@@ -924,7 +973,7 @@ async def test_run_activates_only_passing_staging_profiles_and_supports_rollback
 @pytest.mark.asyncio
 async def test_run_rejects_profile_when_passing_evidence_does_not_match_binding(
     tmp_path: Path,
-    profile_store: SqlRetrievalProfileStore,
+    profile_store: ProfileStoreHarness,
 ) -> None:
     cases, outcomes = _passing_business_scenario()
     dataset = write_dataset(tmp_path / "binding-mismatch.jsonl", cases)
@@ -948,6 +997,7 @@ async def test_run_rejects_profile_when_passing_evidence_does_not_match_binding(
             configuration_fingerprint="a" * 64,
         )
     )
+    manifest = await profile_store.record_completed_test_build(profile_id)
 
     report = await RetrievalEvaluator(
         DeterministicRetriever(outcomes),
@@ -955,6 +1005,7 @@ async def test_run_rejects_profile_when_passing_evidence_does_not_match_binding(
             index_identity="staging-index-v1",
             parser_version="parser-v1",
             chunk_version="chunk-v1",
+            index_build_hash=manifest.build_hash,
         ),
         activator=profile_store,
         candidate_profile_id=profile_id,

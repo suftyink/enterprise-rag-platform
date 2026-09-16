@@ -1,12 +1,21 @@
 from collections.abc import Callable
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from erp_assistant.models.knowledge import KnowledgeDocument
-from erp_assistant.rag.document_indexer import DocumentIndexOutcome
+from erp_assistant.models.knowledge import KnowledgeDocument, RetrievalProfileRecord
+from erp_assistant.rag.document_indexer import (
+    DocumentIndexer,
+    DocumentIndexOutcome,
+    DocumentIndexRetryableError,
+)
 from erp_assistant.rag.errors import RagDependencyError
 from erp_assistant.rag.knowledge_corpus_contracts import CorpusProcessor
+from erp_assistant.rag.runtime_registry import (
+    RetrievalRuntimeBinding,
+    RetrievalRuntimeRegistry,
+)
 from erp_assistant.rag.types import DataClassification
 
 
@@ -48,3 +57,51 @@ class ClassifiedDocumentIndexer:
             )
             raise RagDependencyError(code, "索引路由配置不完整") from exc
         return await indexer.index(document_id)
+
+
+class ActiveProfileDocumentIndexer:
+    """Route every incremental write through the database ACTIVE profile."""
+
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        registry: RetrievalRuntimeRegistry,
+        indexer_factory: Callable[[RetrievalRuntimeBinding], DocumentIndexer],
+    ) -> None:
+        self._sessions = session_factory
+        self._registry = registry
+        self._indexer_factory = indexer_factory
+
+    async def index(self, document_id: UUID) -> DocumentIndexOutcome:
+        async with self._sessions() as session:
+            document = await session.get(KnowledgeDocument, document_id)
+            if document is None:
+                raise LookupError(f"Knowledge document {document_id} does not exist")
+            classification = document.data_classification
+            profile = await session.scalar(
+                select(RetrievalProfileRecord).where(
+                    RetrievalProfileRecord.data_classification == classification,
+                    RetrievalProfileRecord.status == "ACTIVE",
+                )
+            )
+        if profile is None:
+            raise RagDependencyError(
+                "ACTIVE_PROFILE_UNAVAILABLE",
+                "没有可用于增量索引的活动检索 Profile",
+            )
+        binding = self._registry.binding_for(profile)
+        outcome = await self._indexer_factory(binding).index(document_id)
+        async with self._sessions() as session:
+            active_profile_id = await session.scalar(
+                select(RetrievalProfileRecord.id).where(
+                    RetrievalProfileRecord.data_classification == classification,
+                    RetrievalProfileRecord.status == "ACTIVE",
+                )
+            )
+        if active_profile_id != profile.id:
+            raise DocumentIndexRetryableError(
+                "ACTIVE_PROFILE_CHANGED",
+                "活动检索 Profile 在索引期间发生切换，可安全重试",
+                outcome.attempt,
+            )
+        return outcome

@@ -69,6 +69,7 @@ class RecordingVectors:
         self.deleted.append(document_id)
 
 
+
 @dataclass
 class FlakyVectors(RecordingVectors):
     failures_remaining: int = 1
@@ -156,14 +157,18 @@ async def test_cleanup_executor_deletes_artifacts_and_completes_through_corpus(
     )
     storage = RecordingStorage()
     ordinary_vectors = RecordingVectors(identity="ordinary-vectors")
-    restricted_vectors = RecordingVectors(identity="restricted-vectors")
+    restricted_vectors_v1 = RecordingVectors(identity="restricted-vectors-v1")
+    restricted_vectors_v2 = RecordingVectors(identity="restricted-vectors-v2")
     executor = KnowledgeCleanupExecutor(
         session_factory=session_factory,
         storage=storage,
         vectors=ordinary_vectors,  # type: ignore[arg-type]
         vectors_by_classification={
             DataClassification.ORDINARY: ordinary_vectors,  # type: ignore[dict-item]
-            DataClassification.RESTRICTED: restricted_vectors,  # type: ignore[dict-item]
+            DataClassification.RESTRICTED: (
+                restricted_vectors_v1,
+                restricted_vectors_v2,
+            ),  # type: ignore[dict-item]
         },
         corpus=corpus,
     )
@@ -172,7 +177,8 @@ async def test_cleanup_executor_deletes_artifacts_and_completes_through_corpus(
 
     assert outcome.decision is CleanupDecision.COMPLETED
     assert ordinary_vectors.deleted == []
-    assert restricted_vectors.deleted == [vector_id]
+    assert restricted_vectors_v1.deleted == [vector_id]
+    assert restricted_vectors_v2.deleted == [vector_id]
     assert storage.deleted == [document.object_key, document.parsed_object_key]
     view = await corpus.inspect(document_id, SYSTEM_CORPUS_ACTOR)
     assert view.retention_status is RetentionStatus.PURGED
@@ -321,3 +327,79 @@ async def test_cleanup_executor_marks_missing_classification_route_as_retryable(
     failed = await corpus.inspect(document_id, SYSTEM_CORPUS_ACTOR)
     assert failed.cleanup_requests[-1].status is CleanupStatus.FAILED
     assert failed.cleanup_requests[-1].attempt == 1
+
+
+@pytest.mark.asyncio
+async def test_cleanup_executor_fails_closed_when_historical_index_route_is_missing(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    document_id = uuid4()
+    vector_id = uuid4()
+    document = KnowledgeDocument(
+        id=document_id,
+        scope="TENANT",
+        scope_id="tenant-a",
+        tenant_id="tenant-a",
+        document_key="historical-index-sop",
+        version=1,
+        title="Historical Index SOP",
+        original_filename="sop.pdf",
+        media_type="application/pdf",
+        data_classification=DataClassification.ORDINARY.value,
+        size_bytes=100,
+        sha256="e" * 64,
+        object_key="knowledge/historical/original.pdf",
+        vector_document_id=vector_id,
+        status=DocumentStatus.READY.value,
+        active=False,
+        publication_status="WITHDRAWN",
+        retention_status=RetentionStatus.RETAINED.value,
+        index_artifacts_present=True,
+        created_by="test-author",
+    )
+    cleanup = KnowledgeCleanupRequest(
+        document_id=document_id,
+        idempotency_key=f"{document_id}:VECTOR:1",
+        kind="VECTOR",
+        status=CleanupStatus.PENDING.value,
+        artifacts=[
+            {
+                "kind": "vector_document",
+                "document_id": str(vector_id),
+                "index_identity": "retired-index-v1",
+            }
+        ],
+    )
+    async with session_factory() as session:
+        session.add_all(
+            [
+                document,
+                KnowledgeCorpusHead(
+                    scope=document.scope,
+                    scope_id=document.scope_id,
+                    document_key=document.document_key,
+                    revision=1,
+                ),
+                cleanup,
+            ]
+        )
+        await session.commit()
+    corpus = KnowledgeCorpus(session_factory=session_factory, processor=UnusedProcessor())
+    configured = RecordingVectors(identity="current-index-v2")
+    executor = KnowledgeCleanupExecutor(
+        session_factory=session_factory,
+        storage=RecordingStorage(),
+        vectors=configured,  # type: ignore[arg-type]
+        vectors_by_classification={
+            DataClassification.ORDINARY: configured,  # type: ignore[dict-item]
+        },
+        corpus=corpus,
+    )
+
+    with pytest.raises(CleanupRetryableError):
+        await executor.execute(document_id)
+
+    failed = await corpus.inspect(document_id, SYSTEM_CORPUS_ACTOR)
+    assert configured.deleted == []
+    assert failed.cleanup_requests[-1].status is CleanupStatus.FAILED
+    assert failed.cleanup_requests[-1].artifacts == tuple(cleanup.artifacts)

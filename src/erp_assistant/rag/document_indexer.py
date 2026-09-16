@@ -14,7 +14,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from erp_assistant.core.config import Settings
 from erp_assistant.infrastructure.object_storage import ObjectStorage
-from erp_assistant.models.knowledge import KnowledgeChunk, KnowledgeDocument, KnowledgeIndexJob
+from erp_assistant.models.knowledge import (
+    KnowledgeChunk,
+    KnowledgeDocument,
+    KnowledgeIndexJob,
+    KnowledgeVectorArtifact,
+)
 from erp_assistant.orchestration.providers import (
     EmbeddingProvider,
     ProviderBoundary,
@@ -35,6 +40,7 @@ from erp_assistant.rag.types import (
     DocumentStatus,
     IndexJobStatus,
     PublicationStatus,
+    RetentionStatus,
 )
 
 
@@ -62,6 +68,7 @@ class IndexDecision(StrEnum):
     INDEXED_FOR_CURRENT_POLICY = "INDEXED_FOR_CURRENT_POLICY"
     OCR_REQUIRED = "OCR_REQUIRED"
     SKIPPED = "SKIPPED"
+    CONCURRENT_INDEXING = "CONCURRENT_INDEXING"
     PERMANENT_FAILURE = "PERMANENT_FAILURE"
 
 
@@ -110,6 +117,10 @@ class _IndexLeaseLost(Exception):
     pass
 
 
+class _IndexGovernanceChanged(Exception):
+    pass
+
+
 class DocumentIndexer:
     def __init__(
         self,
@@ -152,6 +163,23 @@ class DocumentIndexer:
 
             if job.cleanup_required:
                 await self._cleanup_pending(job)
+            if (
+                RetentionStatus(document.retention_status)
+                is not RetentionStatus.RETAINED
+                or PublicationStatus(document.publication_status)
+                not in {
+                    PublicationStatus.UNPUBLISHED,
+                    PublicationStatus.REVIEW_PENDING,
+                    PublicationStatus.PUBLISHED,
+                }
+            ):
+                return self._outcome(
+                    document,
+                    job,
+                    IndexDecision.SKIPPED,
+                    DocumentStatus(document.status),
+                    "GOVERNANCE_NOT_INDEXABLE",
+                )
             if self._is_current(document, job):
                 return self._outcome(
                     document,
@@ -160,6 +188,9 @@ class DocumentIndexer:
                     DocumentStatus(document.status),
                 )
             was_active = document.active
+            governance_revision = document.governance_revision
+            publication_status = document.publication_status
+            retention_status = document.retention_status
             source_hash = document.sha256
             job_id = job.id
             previous_attempt = job.attempt
@@ -225,7 +256,7 @@ class DocumentIndexer:
                 return self._outcome(
                     document,
                     job,
-                    IndexDecision.SKIPPED,
+                    IndexDecision.CONCURRENT_INDEXING,
                     DocumentStatus(document.status),
                 )
             try:
@@ -354,15 +385,53 @@ class DocumentIndexer:
                     vectors,
                 )
                 failure_code = "DATABASE_WRITE_FAILED"
+                locked_document = await session.scalar(
+                    select(KnowledgeDocument)
+                    .where(KnowledgeDocument.id == document_id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+                if locked_document is None:
+                    raise _IndexGovernanceChanged
+                document = locked_document
+                if (
+                    document.governance_revision != governance_revision
+                    or document.publication_status != publication_status
+                    or document.retention_status != retention_status
+                    or RetentionStatus(document.retention_status)
+                    is not RetentionStatus.RETAINED
+                ):
+                    raise _IndexGovernanceChanged
+                artifact = await session.get(
+                    KnowledgeVectorArtifact,
+                    (document.id, self._vectors.identity),
+                )
+                previous_vector_document_id = (
+                    artifact.vector_document_id
+                    if artifact is not None
+                    else ((document.vector_document_id or document.id) if was_active else None)
+                )
                 if was_active:
                     await session.execute(
                         delete(KnowledgeChunk).where(KnowledgeChunk.document_id == document.id)
                         .where(KnowledgeChunk.index_identity == self._vectors.identity)
                     )
                     session.add_all([self._chunk_model(document, draft) for draft in drafts])
-                cleanup_ids: list[UUID] = []
-                if was_active:
-                    cleanup_ids.append(document.vector_document_id or document.id)
+                if artifact is None:
+                    session.add(
+                        KnowledgeVectorArtifact(
+                            document_id=document.id,
+                            index_identity=self._vectors.identity,
+                            vector_document_id=vector_document_id,
+                        )
+                    )
+                else:
+                    artifact.vector_document_id = vector_document_id
+                cleanup_ids: list[UUID] = (
+                    [previous_vector_document_id]
+                    if previous_vector_document_id is not None
+                    else []
+                )
                 cleanup_ids = [
                     cleanup_id for cleanup_id in cleanup_ids if cleanup_id != vector_document_id
                 ]
@@ -413,7 +482,7 @@ class DocumentIndexer:
                     ) from persistence_error
                 if not persisted:
                     return await self._outcome_from_ids(
-                        document_id, job_id, IndexDecision.SKIPPED, None
+                        document_id, job_id, IndexDecision.CONCURRENT_INDEXING, None
                     )
                 return await self._outcome_from_ids(
                     document_id, job_id, IndexDecision.OCR_REQUIRED, exc.code
@@ -439,7 +508,7 @@ class DocumentIndexer:
                     ) from persistence_error
                 if not persisted:
                     return await self._outcome_from_ids(
-                        document_id, job_id, IndexDecision.SKIPPED, None
+                        document_id, job_id, IndexDecision.CONCURRENT_INDEXING, None
                     )
                 return await self._outcome_from_ids(
                     document_id, job_id, IndexDecision.PERMANENT_FAILURE, exc.code
@@ -452,7 +521,44 @@ class DocumentIndexer:
                     except Exception:
                         pass
                 return await self._outcome_from_ids(
-                    document_id, job_id, IndexDecision.SKIPPED, None
+                    document_id, job_id, IndexDecision.CONCURRENT_INDEXING, None
+                )
+            except _IndexGovernanceChanged:
+                await session.rollback()
+                cleanup_artifacts: list[dict[str, str]] = []
+                if vector_dirty:
+                    try:
+                        await asyncio.to_thread(
+                            self._vectors.delete_document,
+                            stage_document_id,
+                        )
+                    except Exception:
+                        cleanup_artifacts = [
+                            {
+                                "kind": "vector_document",
+                                "document_id": str(stage_document_id),
+                            }
+                        ]
+                persisted = await self._persist_job_aborted(
+                    job_id,
+                    attempt,
+                    source_hash,
+                    claim_token,
+                    phase,
+                    cleanup_artifacts,
+                )
+                if not persisted:
+                    return await self._outcome_from_ids(
+                        document_id,
+                        job_id,
+                        IndexDecision.CONCURRENT_INDEXING,
+                        None,
+                    )
+                return await self._outcome_from_ids(
+                    document_id,
+                    job_id,
+                    IndexDecision.SKIPPED,
+                    "GOVERNANCE_CHANGED",
                 )
             except DocumentIndexRetryableError:
                 raise
@@ -489,7 +595,7 @@ class DocumentIndexer:
                     ) from persistence_error
                 if not persisted:
                     return await self._outcome_from_ids(
-                        document_id, job_id, IndexDecision.SKIPPED, None
+                        document_id, job_id, IndexDecision.CONCURRENT_INDEXING, None
                     )
                 raise DocumentIndexRetryableError(
                     failure_code,
@@ -690,6 +796,38 @@ class DocumentIndexer:
             job.lease_expires_at = None
             job.error_code = code[:64]
             job.error_detail = detail[:2_000]
+            job.cleanup_required = bool(artifacts)
+            job.cleanup_artifacts = artifacts
+            job.finished_at = utc_now()
+            await session.commit()
+            return True
+
+    async def _persist_job_aborted(
+        self,
+        job_id: UUID,
+        attempt: int,
+        source_hash: str,
+        claim_token: str,
+        phase: DocumentStatus,
+        artifacts: list[dict[str, str]],
+    ) -> bool:
+        async with self._sessions() as session:
+            job = await session.scalar(
+                select(KnowledgeIndexJob)
+                .where(KnowledgeIndexJob.id == job_id)
+                .with_for_update()
+            )
+            if job is None or job.claim_token != claim_token:
+                return False
+            job.status = IndexJobStatus.FAILED.value
+            job.phase = phase.value
+            job.attempt = attempt
+            job.pipeline_revision = self.pipeline.revision
+            job.source_hash = source_hash
+            job.claim_token = None
+            job.lease_expires_at = None
+            job.error_code = "GOVERNANCE_CHANGED"
+            job.error_detail = "文档治理状态在索引期间发生变化"
             job.cleanup_required = bool(artifacts)
             job.cleanup_artifacts = artifacts
             job.finished_at = utc_now()

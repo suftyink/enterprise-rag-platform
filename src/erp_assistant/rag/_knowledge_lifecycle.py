@@ -2,13 +2,14 @@ from datetime import UTC, datetime
 from typing import cast
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from erp_assistant.models.knowledge import (
     KnowledgeCleanupRequest,
     KnowledgeCorpusHead,
     KnowledgeDocument,
+    KnowledgeVectorArtifact,
 )
 from erp_assistant.rag.knowledge_corpus_contracts import (
     CorpusError,
@@ -57,7 +58,7 @@ async def apply_transition(
         document.publication_status = PublicationStatus.WITHDRAWN.value
         document.active = False
         head.published_document_id = None
-        _add_cleanup(session, document, CleanupKind.VECTOR, head.revision + 1)
+        await _add_cleanup(session, document, CleanupKind.VECTOR, head.revision + 1)
         return
     if action is LifecycleAction.RESUBMIT:
         if (
@@ -89,7 +90,7 @@ async def apply_transition(
             _invalid(action, publication)
         document.retention_status = RetentionStatus.PURGE_REQUESTED.value
         document.active = False
-        _add_cleanup(
+        await _add_cleanup(
             session,
             document,
             CleanupKind.VECTOR_AND_OBJECT,
@@ -127,6 +128,11 @@ async def apply_transition(
         cleanup.status = CleanupStatus.COMPLETED.value
         cleanup.error_detail = None
         document.index_artifacts_present = False
+        await session.execute(
+            delete(KnowledgeVectorArtifact).where(
+                KnowledgeVectorArtifact.document_id == document.id
+            )
+        )
         if cleanup.kind == CleanupKind.VECTOR_AND_OBJECT.value:
             document.retention_status = RetentionStatus.PURGED.value
         return
@@ -161,18 +167,48 @@ async def _publish(
     await _cancel_outstanding_cleanup(session, document.id)
 
 
-def _add_cleanup(
+async def _add_cleanup(
     session: AsyncSession,
     document: KnowledgeDocument,
     kind: CleanupKind,
     revision: int,
 ) -> None:
+    vector_artifacts = (
+        await session.execute(
+            select(
+                KnowledgeVectorArtifact.index_identity,
+                KnowledgeVectorArtifact.vector_document_id,
+            ).where(KnowledgeVectorArtifact.document_id == document.id)
+        )
+    ).all()
     artifacts = [
         {
             "kind": "vector_document",
-            "document_id": str(document.vector_document_id or document.id),
+            "document_id": str(vector_document_id),
+            "index_identity": index_identity,
         }
+        for index_identity, vector_document_id in vector_artifacts
     ]
+    mapped_vector_ids = {
+        vector_document_id for _, vector_document_id in vector_artifacts
+    }
+    if (
+        document.vector_document_id is not None
+        and document.vector_document_id not in mapped_vector_ids
+    ):
+        artifacts.append(
+            {
+                "kind": "vector_document",
+                "document_id": str(document.vector_document_id),
+            }
+        )
+    if not artifacts:
+        artifacts.append(
+            {
+                "kind": "vector_document",
+                "document_id": str(document.id),
+            }
+        )
     if kind is CleanupKind.VECTOR_AND_OBJECT:
         artifacts.extend(
             {"kind": "object", "object_key": object_key}
