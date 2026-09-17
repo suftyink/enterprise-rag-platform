@@ -17,4 +17,3 @@
 
 已新增持久化 `CorpusRelease`、冻结成员、rollout 和动作审计模型及迁移；bootstrap 仅在活动 Profile 的 manifest 与当前快照完全一致时幂等建立初始 Release，否则明确拒绝。
 
-

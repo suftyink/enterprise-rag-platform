@@ -18,4 +18,3 @@
 
 rollout 已作为 Release 绑定的独立追加记录实现 DISABLED、CANARY、ENABLED、PAUSED；服务端按已认证 subject 判定 cohort，切换、暂停或扩大范围不重建知识，也不会继承旧 Release 的开放状态。
 
-
