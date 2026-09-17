@@ -4,6 +4,7 @@ from uuid import UUID, uuid4
 
 from fastapi import Depends
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from erp_assistant.infrastructure.database import get_session
@@ -11,6 +12,7 @@ from erp_assistant.models.knowledge import RetrievalProfileRecord
 from erp_assistant.models.operations import (
     CorpusReleaseDocumentRecord,
     CorpusReleaseRecord,
+    CorpusReleaseRepairRequestRecord,
     PilotReadinessRecord,
     PilotRolloutRecord,
 )
@@ -291,7 +293,14 @@ class CorpusReleaseWorkflow:
             reason_code="RELEASE_ACTIVATED",
             trace_id=trace_id,
         )
-        await self._session.commit()
+        try:
+            await self._session.commit()
+        except SQLAlchemyError as exc:
+            await self._session.rollback()
+            raise ReleaseError(
+                "ACTIVATION_COMMIT_FAILED",
+                "Release 激活提交失败，原活动版本保持不变",
+            ) from exc
         return await self._store.view(release)
 
     async def rollback(
@@ -420,8 +429,11 @@ class CorpusReleaseWorkflow:
         trace_id: UUID,
     ) -> CorpusReleaseView:
         release = await self._store.release(release_id, lock=True)
-        if release.status != ReleaseStatus.ACTIVE.value:
-            raise ReleaseError("RELEASE_NOT_ACTIVE", "只有活动 Release 可以标记降级")
+        if release.status not in {
+            ReleaseStatus.ACTIVE.value,
+            ReleaseStatus.DEGRADED.value,
+        }:
+            raise ReleaseError("RELEASE_NOT_ACTIVE", "只有当前服务 Release 可以标记降级")
         member = await self._session.get(
             CorpusReleaseDocumentRecord, (release.id, document_id)
         )
@@ -430,6 +442,25 @@ class CorpusReleaseWorkflow:
         release.status = ReleaseStatus.DEGRADED.value
         release.degraded_reason = reason_code
         release.updated_at = datetime.now(UTC)
+        repair_request = await self._session.scalar(
+            select(CorpusReleaseRepairRequestRecord).where(
+                CorpusReleaseRepairRequestRecord.release_id == release.id,
+                CorpusReleaseRepairRequestRecord.excluded_document_id == document_id,
+            )
+        )
+        if repair_request is None:
+            self._session.add(
+                CorpusReleaseRepairRequestRecord(
+                    id=uuid4(),
+                    release_id=release.id,
+                    excluded_document_id=document_id,
+                    status="QUEUED",
+                    requested_by=actor_id,
+                    reason=reason.strip(),
+                    trace_id=trace_id,
+                    created_at=datetime.now(UTC),
+                )
+            )
         self._session.add(
             PilotRolloutRecord(
                 id=uuid4(),
@@ -449,6 +480,15 @@ class CorpusReleaseWorkflow:
             reason_code=reason_code,
             trace_id=trace_id,
         )
+        if repair_request is None:
+            self._store.audit(
+                release,
+                action="QUEUE_REPAIR",
+                actor_id=actor_id,
+                reason=reason.strip(),
+                reason_code="REPAIR_CANDIDATE_QUEUED",
+                trace_id=trace_id,
+            )
         await self._session.commit()
         return await self._store.view(release)
 
@@ -456,8 +496,11 @@ class CorpusReleaseWorkflow:
         self, release_id: UUID, document_id: UUID
     ) -> None:
         release = await self._store.release(release_id)
-        if release.status != ReleaseStatus.ACTIVE.value:
-            raise ReleaseError("RELEASE_NOT_ACTIVE", "只有活动 Release 可以紧急撤回")
+        if release.status not in {
+            ReleaseStatus.ACTIVE.value,
+            ReleaseStatus.DEGRADED.value,
+        }:
+            raise ReleaseError("RELEASE_NOT_ACTIVE", "只有当前服务 Release 可以紧急撤回")
         member = await self._session.get(
             CorpusReleaseDocumentRecord, (release.id, document_id)
         )

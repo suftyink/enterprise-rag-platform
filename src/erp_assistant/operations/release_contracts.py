@@ -57,6 +57,8 @@ class CorpusReleaseView:
     rollout_state: RolloutState
     rollout_subject_ids: tuple[str, ...]
     degraded_reason: str | None
+    failure_reason_code: str | None
+    repair_excluded_document_ids: tuple[UUID, ...]
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -80,4 +82,9 @@ class CorpusReleaseView:
             "rolloutState": self.rollout_state.value,
             "rolloutSubjectIds": list(self.rollout_subject_ids),
             "degradedReason": self.degraded_reason,
+            "failureReasonCode": self.failure_reason_code,
+            "repairPending": bool(self.repair_excluded_document_ids),
+            "repairExcludedDocumentIds": [
+                str(document_id) for document_id in self.repair_excluded_document_ids
+            ],
         }

@@ -13,6 +13,7 @@ from erp_assistant.models.operations import (
     CorpusReleaseAuditRecord,
     CorpusReleaseDocumentRecord,
     CorpusReleaseRecord,
+    CorpusReleaseRepairRequestRecord,
     PilotRolloutRecord,
 )
 from erp_assistant.operations.release_contracts import (
@@ -47,6 +48,16 @@ class CorpusReleaseStore:
             .order_by(PilotRolloutRecord.created_at.desc(), PilotRolloutRecord.id.desc())
             .limit(1)
         )
+        repair_document_ids = tuple(
+            await self.session.scalars(
+                select(CorpusReleaseRepairRequestRecord.excluded_document_id)
+                .where(
+                    CorpusReleaseRepairRequestRecord.release_id == release.id,
+                    CorpusReleaseRepairRequestRecord.status == "QUEUED",
+                )
+                .order_by(CorpusReleaseRepairRequestRecord.created_at)
+            )
+        )
         return CorpusReleaseView(
             id=release.id,
             release_version=release.release_version,
@@ -64,6 +75,8 @@ class CorpusReleaseStore:
             rollout_state=RolloutState(rollout.state) if rollout else RolloutState.DISABLED,
             rollout_subject_ids=tuple(rollout.subject_ids) if rollout else (),
             degraded_reason=release.degraded_reason,
+            failure_reason_code=release.failure_reason_code,
+            repair_excluded_document_ids=repair_document_ids,
         )
 
     async def profile(self, profile_id: UUID) -> RetrievalProfileRecord:

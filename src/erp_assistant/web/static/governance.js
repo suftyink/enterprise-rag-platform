@@ -329,6 +329,11 @@ function releaseCard(release) {
     `corpus ${release.corpusHash.slice(0, 12)}`,
     release.releaseFingerprint ? `release ${release.releaseFingerprint.slice(0, 12)}` : "尚未绑定 readiness",
   ].join(" · ");
+  const repair = document.createElement("p");
+  repair.className = "document-meta";
+  repair.textContent = release.repairPending
+    ? `修复候选待创建 · 排除 ${release.repairExcludedDocumentIds.length} 份文档`
+    : "";
   const actions = document.createElement("div");
   actions.className = "document-actions";
   const available = [];
@@ -347,7 +352,9 @@ function releaseCard(release) {
     button.addEventListener("click", () => manageRelease(release, action));
     actions.append(button);
   });
-  article.append(title, status, identity, actions);
+  article.append(title, status, identity);
+  if (release.repairPending) article.append(repair);
+  article.append(actions);
   return article;
 }
 

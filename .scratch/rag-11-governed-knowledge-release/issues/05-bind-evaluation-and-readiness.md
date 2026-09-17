@@ -17,4 +17,3 @@
 ## Answer
 
 候选评测 CLI 可绑定 `candidate-release-id`，Readiness 绑定严格核对发布版本、索引 build hash、处理配置和路由指纹；缺失、非 PASS、过期或错配证据均以稳定 reason code 阻止 READY/激活。
-

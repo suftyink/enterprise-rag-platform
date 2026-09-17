@@ -86,9 +86,11 @@ async def web_answer(
     payload: AnswerWebRequest,
     actor: Annotated[ActorContext, Depends(get_pilot_actor)],
     assistant: Annotated[KnowledgeAssistant, Depends(get_knowledge_assistant)],
+    gate: Annotated[PilotAccessGate, Depends(get_pilot_access_gate)],
     _: Annotated[None, Depends(require_csrf)],
 ) -> dict[str, object]:
     trace_id = request_trace_id(request)
+    release_state = await gate.state(actor)
     try:
         outcome = await assistant.ask(
             AnswerRequest(question=payload.question.strip(), actor=actor, trace_id=trace_id)
@@ -104,6 +106,8 @@ async def web_answer(
         raise _error(422, code, message) from exc
     return {
         "traceId": str(outcome.trace_id),
+        "releaseId": str(release_state.release_id) if release_state.release_id else None,
+        "releaseVersion": release_state.release_version,
         "decision": outcome.decision.value,
         "reason": outcome.reason,
         "units": [

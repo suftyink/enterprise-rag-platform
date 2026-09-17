@@ -16,6 +16,7 @@ from erp_assistant.models.operations import (
     PilotReadinessRecord,
     PilotRolloutRecord,
 )
+from erp_assistant.operations.release_contracts import ReleaseStatus, RolloutState
 from erp_assistant.rag.types import DataClassification
 
 
@@ -33,6 +34,7 @@ class PilotGateState:
     monitoring_owner: str | None = None
     rollback_owner: str | None = None
     release_id: UUID | None = None
+    release_version: str | None = None
     rollout_state: str | None = None
 
     def to_dict(self) -> dict[str, object]:
@@ -49,6 +51,7 @@ class PilotGateState:
             "monitoringOwner": self.monitoring_owner,
             "rollbackOwner": self.rollback_owner,
             "releaseId": str(self.release_id) if self.release_id else None,
+            "releaseVersion": self.release_version,
             "rolloutState": self.rollout_state,
         }
 
@@ -80,7 +83,9 @@ class PilotAccessGate:
             select(CorpusReleaseRecord).where(
                 CorpusReleaseRecord.data_classification
                 == DataClassification.ORDINARY.value,
-                CorpusReleaseRecord.status.in_(["ACTIVE", "DEGRADED"])
+                CorpusReleaseRecord.status.in_(
+                    [ReleaseStatus.ACTIVE.value, ReleaseStatus.DEGRADED.value]
+                )
             )
         )
         if release is not None:
@@ -137,7 +142,7 @@ class PilotAccessGate:
             select(CorpusReleaseRecord).where(
                 CorpusReleaseRecord.data_classification
                 == DataClassification.ORDINARY.value,
-                CorpusReleaseRecord.status == "ACTIVE",
+                CorpusReleaseRecord.status == ReleaseStatus.ACTIVE.value,
             )
         )
         if release is not None:
@@ -163,7 +168,11 @@ class PilotAccessGate:
                 PilotRolloutRecord(
                     id=uuid4(),
                     release_id=release.id,
-                    state="ENABLED" if decision.enabled else "DISABLED",
+                    state=(
+                        RolloutState.ENABLED.value
+                        if decision.enabled
+                        else RolloutState.DISABLED.value
+                    ),
                     subject_ids=[],
                     approved_by=decision.approved_by,
                     reason=decision.reason.strip(),
@@ -219,7 +228,7 @@ class PilotAccessGate:
         actor: ActorContext | None,
         now: datetime,
     ) -> PilotGateState:
-        if release.status == "DEGRADED":
+        if release.status == ReleaseStatus.DEGRADED.value:
             return _release_gate_state(False, False, "RELEASE_DEGRADED", release)
         if release.readiness_report_id is None or release.release_fingerprint is None:
             return _release_gate_state(False, False, "READINESS_REPORT_MISSING", release)
@@ -241,10 +250,17 @@ class PilotAccessGate:
             .order_by(PilotRolloutRecord.created_at.desc(), PilotRolloutRecord.id.desc())
             .limit(1)
         )
-        if rollout is None or rollout.state in {"DISABLED", "PAUSED"}:
-            reason = "PILOT_PAUSED" if rollout and rollout.state == "PAUSED" else "PILOT_DISABLED"
+        if rollout is None or rollout.state in {
+            RolloutState.DISABLED.value,
+            RolloutState.PAUSED.value,
+        }:
+            reason = (
+                "PILOT_PAUSED"
+                if rollout and rollout.state == RolloutState.PAUSED.value
+                else "PILOT_DISABLED"
+            )
             return _release_gate_state(False, True, reason, release, report, rollout)
-        if rollout.state == "CANARY" and (
+        if rollout.state == RolloutState.CANARY.value and (
             actor is None or actor.subject_id not in set(rollout.subject_ids)
         ):
             return _release_gate_state(
@@ -316,5 +332,6 @@ def _release_gate_state(
         monitoring_owner=release.monitoring_owner,
         rollback_owner=release.rollback_owner,
         release_id=release.id,
+        release_version=release.release_version,
         rollout_state=rollout.state if rollout else None,
     )

@@ -17,4 +17,3 @@
 ## Answer
 
 staging 构建现可绑定冻结 Release 成员，继续复用既有内容/处理指纹去重能力，并在 Profile、索引身份、构建前后语料或 manifest 不一致时以稳定错误拒绝进入评测；当前活动 Release 不受候选构建影响。
-

@@ -16,5 +16,4 @@
 
 ## Answer
 
-系统管理员可从治理界面走紧急撤回：先通过原生命周期立即写入 WITHDRAWN 并排队物理清理，再把活动 Release 标记 DEGRADED、rollout 置 PAUSED。检索和生成前复核都要求活动成员关系且排除 WITHDRAWN，因此无需等待向量删除即可止血。
-
+系统管理员可从治理界面走紧急撤回：先通过原生命周期立即写入 WITHDRAWN 并排队物理清理，再把当前服务 Release 标记 DEGRADED、rollout 置 PAUSED，并持久化排除该文档的修复候选请求。已降级 Release 仍可继续撤回其他风险成员；检索和生成前复核都要求活动成员关系且排除 WITHDRAWN，因此无需等待向量删除即可止血。

@@ -98,6 +98,7 @@ class CorpusReleaseRecord(Base):
     monitoring_owner: Mapped[str | None] = mapped_column(String(128))
     rollback_owner: Mapped[str | None] = mapped_column(String(128))
     degraded_reason: Mapped[str | None] = mapped_column(String(128))
+    failure_reason_code: Mapped[str | None] = mapped_column(String(128))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -142,5 +143,29 @@ class CorpusReleaseAuditRecord(Base):
     actor_id: Mapped[str] = mapped_column(String(128), nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     reason_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    trace_id: Mapped[UUID] = mapped_column(Uuid, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class CorpusReleaseRepairRequestRecord(Base):
+    __tablename__ = "corpus_release_repair_request"
+    __table_args__ = (
+        UniqueConstraint(
+            "release_id",
+            "excluded_document_id",
+            name="uq_release_repair_excluded_document",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    release_id: Mapped[UUID] = mapped_column(
+        ForeignKey("corpus_release.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    excluded_document_id: Mapped[UUID] = mapped_column(
+        ForeignKey("knowledge_document.id", ondelete="RESTRICT"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    requested_by: Mapped[str] = mapped_column(String(128), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
     trace_id: Mapped[UUID] = mapped_column(Uuid, nullable=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

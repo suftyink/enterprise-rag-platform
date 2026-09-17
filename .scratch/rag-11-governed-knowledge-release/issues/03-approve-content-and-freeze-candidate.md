@@ -17,4 +17,3 @@
 ## Answer
 
 内容治理在 UI 中明确为“批准入候选”，不会直接切换服务；候选创建冻结文档集合、版本摘要、治理 revision、corpus hash、generation 和文档数，并记录 actor、reason code 与 trace。
-

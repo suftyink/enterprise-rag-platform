@@ -8,6 +8,7 @@ from erp_assistant.infrastructure.database import SessionFactory
 from erp_assistant.infrastructure.object_storage import get_object_storage
 from erp_assistant.models.knowledge import RetrievalProfileRecord
 from erp_assistant.models.operations import CorpusReleaseDocumentRecord, CorpusReleaseRecord
+from erp_assistant.operations.release_contracts import ReleaseStatus
 from erp_assistant.rag.document_indexer import DocumentIndexer
 from erp_assistant.rag.errors import RagError
 from erp_assistant.rag.index_manifest import (
@@ -96,11 +97,26 @@ async def build_staging_index(
         data_classification=classification,
         document_ids=snapshot_before.document_ids,
     )
-    async with session_factory() as session:
-        snapshot_after = (
-            await capture_corpus_snapshot(session, classification)
-            if release_id is None
-            else await capture_document_snapshot(session, snapshot_before.document_ids)
+    try:
+        async with session_factory() as session:
+            snapshot_after = (
+                await capture_corpus_snapshot(session, classification)
+                if release_id is None
+                else await capture_document_snapshot(session, snapshot_before.document_ids)
+            )
+    except ValueError as exc:
+        await _mark_release_failed(
+            session_factory, release_id, "CANDIDATE_CORPUS_DRIFT"
+        )
+        raise RagError(
+            "CANDIDATE_CORPUS_DRIFT", "候选 Release 冻结文档在构建期间发生漂移"
+        ) from exc
+    if snapshot_after != snapshot_before:
+        await _mark_release_failed(
+            session_factory, release_id, "CANDIDATE_CORPUS_DRIFT"
+        )
+        raise RagError(
+            "CANDIDATE_CORPUS_DRIFT", "候选 Release 冻结文档在构建期间发生漂移"
         )
     if (
         result.document_count == 0
@@ -108,8 +124,10 @@ async def build_staging_index(
         or result.ocr_required_count
         or result.permanent_failure_count
         or result.indexed_count + result.skipped_count != result.document_count
-        or snapshot_after != snapshot_before
     ):
+        await _mark_release_failed(
+            session_factory, release_id, "STAGING_INDEX_INCOMPLETE"
+        )
         raise RagError("STAGING_INDEX_INCOMPLETE", "候选 staging 索引构建不完整")
     manifest = build_manifest(candidate, snapshot_after)
     async with session_factory() as session:
@@ -122,3 +140,24 @@ async def build_staging_index(
         stored.index_build_completed_at = datetime.now(UTC)
         await session.commit()
     return result
+
+
+async def _mark_release_failed(
+    session_factory: async_sessionmaker[AsyncSession],
+    release_id: UUID | None,
+    reason_code: str,
+) -> None:
+    if release_id is None:
+        return
+    async with session_factory() as session:
+        release = await session.get(CorpusReleaseRecord, release_id)
+        if release is None:
+            return
+        if release.status in {
+            ReleaseStatus.BUILDING.value,
+            ReleaseStatus.EVALUATING.value,
+        }:
+            release.status = ReleaseStatus.FAILED.value
+            release.failure_reason_code = reason_code
+            release.updated_at = datetime.now(UTC)
+            await session.commit()

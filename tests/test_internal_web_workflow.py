@@ -12,7 +12,7 @@ from uuid import UUID, uuid4
 import pytest
 import uvicorn
 from playwright.sync_api import Browser, Page, Route, sync_playwright
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -28,6 +28,7 @@ from erp_assistant.main import app
 from erp_assistant.models.knowledge import KnowledgeDocument, RetrievalProfileRecord
 from erp_assistant.models.operations import (
     CorpusReleaseAuditRecord,
+    CorpusReleaseRepairRequestRecord,
     PilotAccessRecord,
     PilotReadinessRecord,
 )
@@ -70,6 +71,7 @@ CHROME = Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe")
 ACTIVE_PROFILE_ID = UUID("22222222-2222-2222-2222-222222222222")
 CANDIDATE_PROFILE_ID = UUID("33333333-3333-3333-3333-333333333333")
 RELEASE_DOCUMENT_ID = UUID("44444444-4444-4444-4444-444444444444")
+SECOND_RELEASE_DOCUMENT_ID = UUID("77777777-7777-7777-7777-777777777777")
 
 
 @dataclass
@@ -100,8 +102,10 @@ class MemorySessionStore:
 @dataclass
 class FakeAssistant:
     feedback: list[FeedbackRequest] = field(default_factory=list)
+    requests: list[AnswerRequest] = field(default_factory=list)
 
     async def ask(self, request: AnswerRequest) -> AnswerOutcome:
+        self.requests.append(request)
         if "故障" in request.question:
             raise RagDependencyError("MODEL_UNAVAILABLE", "回答模型暂时不可用")
         if "无权限" in request.question:
@@ -131,7 +135,7 @@ class FakeAssistant:
             citations=(
                 AnswerCitation(
                     evidence_id="E1",
-                    document_id=uuid4(),
+                    document_id=RELEASE_DOCUMENT_ID,
                     document_key="eu-warehouse-sop",
                     document_version=3,
                     title="欧洲仓库存差异处理规范",
@@ -664,6 +668,31 @@ def test_admin_release_workflow_activates_canaries_rolls_back_and_withdraws(
         {},
     )
     assert ready["status"] == "READY"
+
+    _set_activation_failure_trigger_sync(internal_web_server.sessions, enabled=True)
+    assert _browser_api_error(
+        page,
+        csrf,
+        f"/internal/api/releases/{candidate_id}/activate",
+        {
+            "pilotScope": "内部 QA",
+            "capacity": "10 RPS",
+            "monitoringOwner": "ops-owner",
+            "rollbackOwner": "release-owner",
+            "reason": "注入提交前故障",
+        },
+    ) == (409, "ACTIVATION_COMMIT_FAILED")
+    releases_after_failure = page.evaluate(
+        "async () => await (await fetch('/internal/api/releases')).json()"
+    )
+    assert next(
+        item for item in releases_after_failure if item["releaseId"] == bootstrap["releaseId"]
+    )["status"] == "ACTIVE"
+    assert next(
+        item for item in releases_after_failure if item["releaseId"] == candidate_id
+    )["status"] == "READY"
+    _set_activation_failure_trigger_sync(internal_web_server.sessions, enabled=False)
+
     activated = _browser_api(
         page,
         csrf,
@@ -711,6 +740,15 @@ def test_admin_release_workflow_activates_canaries_rolls_back_and_withdraws(
     pilot = page.evaluate("async () => await (await fetch('/internal/api/pilot')).json()")
     assert pilot["enabled"] is True
     assert pilot["releaseId"] == candidate_id
+    answer = _browser_api(
+        page,
+        csrf,
+        "/internal/api/answers",
+        {"question": "当前发布版本的处理时限是什么？"},
+    )
+    assert answer["releaseId"] == candidate_id
+    assert answer["releaseVersion"] == "spec11-candidate-v1"
+    assert answer["citations"][0]["documentId"] == str(RELEASE_DOCUMENT_ID)
 
     paused = _browser_api(
         page,
@@ -762,6 +800,32 @@ def test_admin_release_workflow_activates_canaries_rolls_back_and_withdraws(
     assert degraded["status"] == "DEGRADED"
     assert degraded["rolloutState"] == "PAUSED"
     assert degraded["degradedReason"] == "EMERGENCY_WITHDRAWAL"
+    assert degraded["repairPending"] is True
+    assert degraded["repairExcludedDocumentIds"] == [str(RELEASE_DOCUMENT_ID)]
+    requests_before_closed_answer = len(internal_web_server.assistant.requests)
+    assert _browser_api_error(
+        page,
+        csrf,
+        "/internal/api/answers",
+        {"question": "撤回后不应再返回目标引用"},
+    ) == (503, "RELEASE_DEGRADED")
+    assert len(internal_web_server.assistant.requests) == requests_before_closed_answer
+
+    degraded_again = _browser_api(
+        page,
+        csrf,
+        (
+            f"/internal/api/releases/{bootstrap['releaseId']}/documents/"
+            f"{SECOND_RELEASE_DOCUMENT_ID}/emergency-withdraw"
+        ),
+        {"reason": "发现第二份风险内容"},
+    )
+    assert degraded_again["status"] == "DEGRADED"
+    assert set(degraded_again["repairExcludedDocumentIds"]) == {
+        str(RELEASE_DOCUMENT_ID),
+        str(SECOND_RELEASE_DOCUMENT_ID),
+    }
+    assert _release_repair_request_count_sync(internal_web_server.sessions) == 2
 
     releases = page.evaluate("async () => await (await fetch('/internal/api/releases')).json()")
     assert {item["releaseVersion"] for item in releases} == {
@@ -836,6 +900,74 @@ def _release_audit_actions_sync(
     def load() -> None:
         try:
             results.append(asyncio.run(_release_audit_actions(factory)))
+        except BaseException as exc:  # pragma: no cover - re-raised in caller
+            errors.append(exc)
+
+    thread = threading.Thread(target=load)
+    thread.start()
+    thread.join(timeout=10)
+    if errors:
+        raise errors[0]
+    assert results
+    return results[0]
+
+
+async def _set_activation_failure_trigger(
+    factory: async_sessionmaker[AsyncSession], *, enabled: bool
+) -> None:
+    async with factory() as session:
+        if enabled:
+            await session.execute(
+                text(
+                    """
+                    CREATE TRIGGER fail_candidate_activation
+                    BEFORE UPDATE OF status ON corpus_release
+                    WHEN OLD.status = 'READY' AND NEW.status = 'ACTIVE'
+                    BEGIN
+                      SELECT RAISE(ABORT, 'injected activation failure');
+                    END
+                    """
+                )
+            )
+        else:
+            await session.execute(text("DROP TRIGGER fail_candidate_activation"))
+        await session.commit()
+
+
+def _set_activation_failure_trigger_sync(
+    factory: async_sessionmaker[AsyncSession], *, enabled: bool
+) -> None:
+    errors: list[BaseException] = []
+
+    def update() -> None:
+        try:
+            asyncio.run(_set_activation_failure_trigger(factory, enabled=enabled))
+        except BaseException as exc:  # pragma: no cover - re-raised in caller
+            errors.append(exc)
+
+    thread = threading.Thread(target=update)
+    thread.start()
+    thread.join(timeout=10)
+    if errors:
+        raise errors[0]
+
+
+async def _release_repair_request_count(
+    factory: async_sessionmaker[AsyncSession],
+) -> int:
+    async with factory() as session:
+        return len((await session.scalars(select(CorpusReleaseRepairRequestRecord))).all())
+
+
+def _release_repair_request_count_sync(
+    factory: async_sessionmaker[AsyncSession],
+) -> int:
+    results: list[int] = []
+    errors: list[BaseException] = []
+
+    def load() -> None:
+        try:
+            results.append(asyncio.run(_release_repair_request_count(factory)))
         except BaseException as exc:  # pragma: no cover - re-raised in caller
             errors.append(exc)
 
@@ -936,8 +1068,9 @@ async def _prepare_release_workflow(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with factory() as session:
-        session.add(
-            KnowledgeDocument(
+        session.add_all(
+            [
+                KnowledgeDocument(
                 id=RELEASE_DOCUMENT_ID,
                 scope="TENANT",
                 scope_id="tenant-a",
@@ -958,7 +1091,30 @@ async def _prepare_release_workflow(
                 governance_revision=1,
                 index_artifacts_present=True,
                 created_by="system-admin",
-            )
+                ),
+                KnowledgeDocument(
+                    id=SECOND_RELEASE_DOCUMENT_ID,
+                    scope="TENANT",
+                    scope_id="tenant-a",
+                    tenant_id="tenant-a",
+                    document_key="release-guide-secondary",
+                    version=1,
+                    title="发布补充指南",
+                    original_filename="release-secondary.md",
+                    media_type="text/markdown",
+                    data_classification="ORDINARY",
+                    size_bytes=80,
+                    sha256="f" * 64,
+                    object_key="knowledge/release-secondary.md",
+                    status="READY",
+                    active=True,
+                    publication_status="PUBLISHED",
+                    retention_status="RETAINED",
+                    governance_revision=1,
+                    index_artifacts_present=True,
+                    created_by="system-admin",
+                ),
+            ]
         )
         profiles = [
             RetrievalProfileRecord(
