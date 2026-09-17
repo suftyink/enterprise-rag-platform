@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -32,7 +34,7 @@ class ProfileBoundRetriever:
         self._enforce_binding = settings.app_env.casefold() == "production"
 
     async def retrieve(self, request: RetrievalRequest) -> RetrievalOutcome:
-        if not self._enforce_binding:
+        if not self._enforce_binding and request.expected_release_id is None:
             return await self._retriever.retrieve(request)
         active_release = await self._session.scalar(
             select(CorpusReleaseRecord).where(
@@ -40,6 +42,18 @@ class ProfileBoundRetriever:
                 CorpusReleaseRecord.status == "ACTIVE",
             )
         )
+        if request.expected_release_id is not None and (
+            active_release is None
+            or active_release.id != request.expected_release_id
+            or (
+                request.expected_release_version is not None
+                and active_release.release_version != request.expected_release_version
+            )
+        ):
+            raise RagDependencyError(
+                "ACTIVE_RELEASE_CHANGED",
+                "问答授权的 Release 已不再活动，请重试",
+            )
         if active_release is not None:
             active = await self._session.get(
                 RetrievalProfileRecord, active_release.profile_id
@@ -54,15 +68,15 @@ class ProfileBoundRetriever:
             )
         if active is None:
             raise RagDependencyError("ACTIVE_PROFILE_UNAVAILABLE", "没有已激活的检索 Profile")
-        if self._runtime_registry is not None:
+        retriever = self._retriever
+        if self._runtime_registry is not None and self._enforce_binding:
             retriever = self._runtime_registry.resolve(
                 active,
                 self._session,
                 self._identity,
                 self._telemetry,
             )
-            return await retriever.retrieve(request)
-        if (
+        elif self._enforce_binding and (
             not active.production_ready
             or active.index_identity != self._retriever.index_identity
             or active.configuration_fingerprint != self._retriever.configuration_fingerprint()
@@ -70,4 +84,22 @@ class ProfileBoundRetriever:
             raise RagDependencyError(
                 "ACTIVE_PROFILE_BINDING_MISMATCH", "运行时检索绑定与活动 Profile 不一致"
             )
-        return await self._retriever.retrieve(request)
+        outcome = await retriever.retrieve(request)
+        if active_release is None:
+            return outcome
+        confirmed_release_id = await self._session.scalar(
+            select(CorpusReleaseRecord.id).where(
+                CorpusReleaseRecord.id == active_release.id,
+                CorpusReleaseRecord.status == "ACTIVE",
+            )
+        )
+        if confirmed_release_id is None:
+            raise RagDependencyError(
+                "ACTIVE_RELEASE_CHANGED",
+                "检索期间活动 Release 已变化，请重试",
+            )
+        return replace(
+            outcome,
+            release_id=active_release.id,
+            release_version=active_release.release_version,
+        )

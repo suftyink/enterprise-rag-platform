@@ -96,6 +96,8 @@ class RetrievalRequest:
     evidence_limit: int = 5
     data_classification: DataClassification = DataClassification.ORDINARY
     trace_id: UUID = field(default_factory=uuid4)
+    expected_release_id: UUID | None = None
+    expected_release_version: str | None = None
 
 
 @dataclass(frozen=True)
@@ -142,6 +144,8 @@ class RetrievalOutcome:
     decision: SearchDecision
     evidence: tuple[RetrievalEvidence, ...]
     run: RetrievalRun
+    release_id: UUID | None = None
+    release_version: str | None = None
 
 
 class KnowledgeRetriever:
@@ -302,14 +306,22 @@ class KnowledgeRetriever:
             return ()
 
         try:
-            release_id = await self._session.scalar(
-                select(CorpusReleaseRecord.id).where(
-                    CorpusReleaseRecord.status == "ACTIVE",
-                    CorpusReleaseRecord.data_classification
-                    == request.data_classification.value,
-                    CorpusReleaseRecord.index_identity == self.index_identity,
-                )
+            release_statement = select(CorpusReleaseRecord.id).where(
+                CorpusReleaseRecord.status == "ACTIVE",
+                CorpusReleaseRecord.data_classification
+                == request.data_classification.value,
+                CorpusReleaseRecord.index_identity == self.index_identity,
             )
+            if request.expected_release_id is not None:
+                release_statement = release_statement.where(
+                    CorpusReleaseRecord.id == request.expected_release_id
+                )
+            release_id = await self._session.scalar(release_statement)
+            if request.expected_release_id is not None and release_id is None:
+                raise RagDependencyError(
+                    "ACTIVE_RELEASE_CHANGED",
+                    "问答期间活动 Release 已变化，请重试",
+                )
             statement = select(KnowledgeChunk, KnowledgeDocument).join(
                 KnowledgeDocument, KnowledgeDocument.id == KnowledgeChunk.document_id
             )
@@ -339,6 +351,8 @@ class KnowledgeRetriever:
                     )
                 )
             ).all()
+        except RagDependencyError:
+            raise
         except Exception as exc:
             self._emit_failure(request, "filtering", "DATABASE_SEARCH_FAILED")
             raise RagDependencyError("DATABASE_SEARCH_FAILED", "知识元数据查询失败") from exc

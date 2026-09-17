@@ -22,6 +22,7 @@ from erp_assistant.orchestration.providers import (
     ChatResult,
     ProviderBoundary,
 )
+from erp_assistant.rag.errors import RagDependencyError
 from erp_assistant.rag.knowledge_assistant import (
     AnswerDecision,
     AnswerRequest,
@@ -127,7 +128,12 @@ async def answer_sessions() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
         await engine.dispose()
 
 
-def retrieval_outcome(evidence: tuple[RetrievalEvidence, ...]) -> RetrievalOutcome:
+def retrieval_outcome(
+    evidence: tuple[RetrievalEvidence, ...],
+    *,
+    release_id: UUID | None = None,
+    release_version: str | None = None,
+) -> RetrievalOutcome:
     return RetrievalOutcome(
         decision=(SearchDecision.MATCHED if evidence else SearchDecision.INSUFFICIENT_KNOWLEDGE),
         evidence=evidence,
@@ -140,6 +146,8 @@ def retrieval_outcome(evidence: tuple[RetrievalEvidence, ...]) -> RetrievalOutco
             config_fingerprint="a" * 64,
             elapsed_ms=1.0,
         ),
+        release_id=release_id,
+        release_version=release_version,
     )
 
 
@@ -261,6 +269,39 @@ async def activate_release_for_evidence(
             )
         )
         await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_ask_fails_closed_when_retrieval_switches_release(
+    answer_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    expected_release_id = uuid4()
+    actual_release_id = uuid4()
+    retriever = DeterministicRetriever(
+        retrieval_outcome(
+            (),
+            release_id=actual_release_id,
+            release_version="candidate-v2",
+        )
+    )
+    assistant = KnowledgeAssistant(
+        retriever=retriever,
+        chat_routes={},
+        session_factory=answer_sessions,
+    )
+
+    with pytest.raises(RagDependencyError) as caught:
+        await assistant.ask(
+            AnswerRequest(
+                question="Which release should answer?",
+                actor=ActorContext(subject_id="employee-a", tenant_id="tenant-a"),
+                expected_release_id=expected_release_id,
+                expected_release_version="candidate-v1",
+            )
+        )
+
+    assert caught.value.code == "ACTIVE_RELEASE_CHANGED"
+    assert retriever.requests[0].expected_release_id == expected_release_id
 
 
 @pytest.mark.asyncio

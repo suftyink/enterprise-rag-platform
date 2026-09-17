@@ -87,16 +87,25 @@ async def build_staging_index(
         or indexer.pipeline.chunking != candidate.chunk_version
         or indexer.pipeline.vector_index != candidate.index_identity
     ):
+        await _mark_release_failed(
+            session_factory, release_id, "PROFILE_INDEX_BINDING_MISMATCH"
+        )
         raise RagError(
             "PROFILE_INDEX_BINDING_MISMATCH",
             "候选 Profile 与实际 Parser、Chunk 或索引身份不一致",
         )
-    result = await reindex_active_documents(
-        indexer,
-        session_factory,
-        data_classification=classification,
-        document_ids=snapshot_before.document_ids,
-    )
+    try:
+        result = await reindex_active_documents(
+            indexer,
+            session_factory,
+            data_classification=classification,
+            document_ids=snapshot_before.document_ids,
+        )
+    except Exception:
+        await _mark_release_failed(
+            session_factory, release_id, "STAGING_BUILD_EXECUTION_FAILED"
+        )
+        raise
     try:
         async with session_factory() as session:
             snapshot_after = (
@@ -132,13 +141,18 @@ async def build_staging_index(
     manifest = build_manifest(candidate, snapshot_after)
     async with session_factory() as session:
         stored = await session.get_one(RetrievalProfileRecord, profile_id)
-        if stored.status != candidate.status:
-            raise RagError("INVALID_PROFILE_TRANSITION", "候选 Profile 状态已发生变化")
-        stored.index_build_hash = manifest.build_hash
-        stored.index_build_corpus_hash = manifest.corpus_hash
-        stored.index_build_document_count = manifest.document_count
-        stored.index_build_completed_at = datetime.now(UTC)
-        await session.commit()
+        profile_drifted = stored.status != candidate.status
+        if not profile_drifted:
+            stored.index_build_hash = manifest.build_hash
+            stored.index_build_corpus_hash = manifest.corpus_hash
+            stored.index_build_document_count = manifest.document_count
+            stored.index_build_completed_at = datetime.now(UTC)
+            await session.commit()
+    if profile_drifted:
+        await _mark_release_failed(
+            session_factory, release_id, "CANDIDATE_PROFILE_DRIFT"
+        )
+        raise RagError("INVALID_PROFILE_TRANSITION", "候选 Profile 状态已发生变化")
     return result
 
 

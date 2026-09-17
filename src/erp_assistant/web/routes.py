@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import Annotated
 from uuid import UUID
 
@@ -53,6 +54,7 @@ from erp_assistant.rag.types import KnowledgeScope
 from erp_assistant.web.pilot import (
     PilotAccessDecision,
     PilotAccessGate,
+    PilotGateState,
     get_pilot_access_gate,
 )
 from erp_assistant.web.schemas import (
@@ -72,28 +74,38 @@ def get_web_knowledge_corpus() -> KnowledgeCorpus:
     return get_knowledge_corpus()
 
 
+@dataclass(frozen=True)
+class PilotRequestContext:
+    actor: ActorContext
+    gate: PilotGateState
+
+
 async def get_pilot_actor(
     actor: Annotated[ActorContext, Depends(get_web_actor)],
     gate: Annotated[PilotAccessGate, Depends(get_pilot_access_gate)],
-) -> ActorContext:
-    await gate.require_enabled(actor)
-    return actor
+) -> PilotRequestContext:
+    return PilotRequestContext(actor, await gate.require_enabled(actor))
 
 
 @router.post("/internal/api/answers")
 async def web_answer(
     request: Request,
     payload: AnswerWebRequest,
-    actor: Annotated[ActorContext, Depends(get_pilot_actor)],
+    pilot: Annotated[PilotRequestContext, Depends(get_pilot_actor)],
     assistant: Annotated[KnowledgeAssistant, Depends(get_knowledge_assistant)],
-    gate: Annotated[PilotAccessGate, Depends(get_pilot_access_gate)],
     _: Annotated[None, Depends(require_csrf)],
 ) -> dict[str, object]:
     trace_id = request_trace_id(request)
-    release_state = await gate.state(actor)
+    actor = pilot.actor
     try:
         outcome = await assistant.ask(
-            AnswerRequest(question=payload.question.strip(), actor=actor, trace_id=trace_id)
+            AnswerRequest(
+                question=payload.question.strip(),
+                actor=actor,
+                trace_id=trace_id,
+                expected_release_id=pilot.gate.release_id,
+                expected_release_version=pilot.gate.release_version,
+            )
         )
     except RagDependencyError as exc:
         raise _error(503, exc.code, exc.message) from exc
@@ -106,8 +118,8 @@ async def web_answer(
         raise _error(422, code, message) from exc
     return {
         "traceId": str(outcome.trace_id),
-        "releaseId": str(release_state.release_id) if release_state.release_id else None,
-        "releaseVersion": release_state.release_version,
+        "releaseId": str(outcome.release_id) if outcome.release_id else None,
+        "releaseVersion": outcome.release_version,
         "decision": outcome.decision.value,
         "reason": outcome.reason,
         "units": [
@@ -140,7 +152,7 @@ async def web_answer(
 async def web_feedback(
     trace_id: UUID,
     payload: FeedbackWebRequest,
-    actor: Annotated[ActorContext, Depends(get_pilot_actor)],
+    pilot: Annotated[PilotRequestContext, Depends(get_pilot_actor)],
     assistant: Annotated[KnowledgeAssistant, Depends(get_knowledge_assistant)],
     _: Annotated[None, Depends(require_csrf)],
 ) -> WebFeedbackReceipt:
@@ -148,7 +160,7 @@ async def web_feedback(
         receipt = await assistant.submit_feedback(
             FeedbackRequest(
                 trace_id=trace_id,
-                actor=actor,
+                actor=pilot.actor,
                 rating=FeedbackRating(payload.rating),
                 reason=payload.reason,
             )

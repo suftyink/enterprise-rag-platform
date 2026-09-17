@@ -148,6 +148,8 @@ class FakeAssistant:
                     excerpt="运营人员应在发现差异后的 2 个工作日内完成复核。",
                 ),
             ),
+            release_id=request.expected_release_id,
+            release_version=request.expected_release_version,
         )
 
     async def submit_feedback(self, request: FeedbackRequest) -> FeedbackReceipt:

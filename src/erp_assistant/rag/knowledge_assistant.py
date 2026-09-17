@@ -57,6 +57,8 @@ class AnswerRequest:
     evidence_limit: int = 5
     data_classification: DataClassification = DataClassification.ORDINARY
     trace_id: UUID = field(default_factory=uuid4)
+    expected_release_id: UUID | None = None
+    expected_release_version: str | None = None
 
 
 @dataclass(frozen=True)
@@ -89,6 +91,8 @@ class AnswerOutcome:
     citations: tuple[AnswerCitation, ...]
     reason: str | None = None
     model: str | None = None
+    release_id: UUID | None = None
+    release_version: str | None = None
 
 
 @dataclass(frozen=True)
@@ -158,8 +162,18 @@ class KnowledgeAssistant:
                 evidence_limit=request.evidence_limit,
                 data_classification=request.data_classification,
                 trace_id=trace_id,
+                expected_release_id=request.expected_release_id,
+                expected_release_version=request.expected_release_version,
             )
         )
+        if request.expected_release_id is not None and (
+            retrieval.release_id != request.expected_release_id
+            or retrieval.release_version != request.expected_release_version
+        ):
+            raise RagDependencyError(
+                "ACTIVE_RELEASE_CHANGED",
+                "问答期间活动 Release 已变化，请重试",
+            )
         if retrieval.decision is SearchDecision.INSUFFICIENT_KNOWLEDGE or not retrieval.evidence:
             return await self._finish(
                 request,
@@ -391,6 +405,12 @@ class KnowledgeAssistant:
         request: AnswerRequest,
         outcome: AnswerOutcome,
     ) -> AnswerOutcome:
+        if request.expected_release_id is not None:
+            outcome = replace(
+                outcome,
+                release_id=request.expected_release_id,
+                release_version=request.expected_release_version,
+            )
         async with self._sessions() as session:
             run = await session.get(KnowledgeAnswerRun, outcome.trace_id)
             if run is None:
