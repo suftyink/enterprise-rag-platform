@@ -221,7 +221,7 @@ async function completeLifecycleConfirmation() {
 function scheduleProgressRefresh(documents) {
   if (documentRefreshTimer !== null) window.clearTimeout(documentRefreshTimer);
   const processing = documents.some((item) =>
-    ["QUEUED", "PROCESSING", "PARSING", "INDEXING"].includes(item.jobStatus)
+    ["QUEUED", "RUNNING"].includes(item.jobStatus)
   );
   documentRefreshTimer = processing
     ? window.setTimeout(() => loadDocuments(), 2000)

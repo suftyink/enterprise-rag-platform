@@ -1,4 +1,5 @@
 import asyncio
+import json
 import socket
 import threading
 import time
@@ -10,7 +11,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import uvicorn
-from playwright.sync_api import Browser, sync_playwright
+from playwright.sync_api import Browser, Route, sync_playwright
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -455,6 +456,32 @@ def test_admin_upload_governance_confirmation_and_pilot_controls(
     assert card.get_by_text("QUEUED", exact=True).first.is_visible()
     assert card.get_by_text("分块数量").is_visible()
     assert internal_web_server.storage.objects
+
+    progress_requests = 0
+
+    def advance_document_progress(route: Route) -> None:
+        nonlocal progress_requests
+        upstream = route.fetch()
+        documents = upstream.json()
+        progress_requests += 1
+        job_status, phase, chunk_count = (
+            ("RUNNING", "INDEXING", None)
+            if progress_requests == 1
+            else ("SUCCEEDED", "READY", 4)
+        )
+        for document in documents:
+            if document["documentKey"] == "pilot-guide":
+                document["jobStatus"] = job_status
+                document["phase"] = phase
+                document["chunkCount"] = chunk_count
+        route.fulfill(response=upstream, body=json.dumps(documents))
+
+    page.route("**/internal/api/documents", advance_document_progress)
+    page.get_by_role("button", name="刷新列表").click()
+    card.get_by_text("RUNNING", exact=True).wait_for()
+    card.get_by_text("SUCCEEDED", exact=True).wait_for(timeout=5_000)
+    assert progress_requests >= 2
+    page.unroute("**/internal/api/documents", advance_document_progress)
 
     for label, action in (
         ("发布", LifecycleAction.PUBLISH),
