@@ -7,9 +7,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from erp_assistant.infrastructure.database import SessionFactory
 from erp_assistant.infrastructure.object_storage import get_object_storage
 from erp_assistant.models.knowledge import RetrievalProfileRecord
+from erp_assistant.models.operations import CorpusReleaseDocumentRecord, CorpusReleaseRecord
 from erp_assistant.rag.document_indexer import DocumentIndexer
 from erp_assistant.rag.errors import RagError
-from erp_assistant.rag.index_manifest import build_manifest, capture_corpus_snapshot
+from erp_assistant.rag.index_manifest import (
+    build_manifest,
+    capture_corpus_snapshot,
+    capture_document_snapshot,
+)
 from erp_assistant.rag.pdf_parser import PypdfParser
 from erp_assistant.rag.reindex import ReindexResult, reindex_active_documents
 from erp_assistant.rag.runtime_registry import RetrievalRuntimeRegistry
@@ -20,6 +25,8 @@ async def build_staging_index(
     profile_id: UUID,
     registry: RetrievalRuntimeRegistry,
     session_factory: async_sessionmaker[AsyncSession] = SessionFactory,
+    *,
+    release_id: UUID | None = None,
 ) -> ReindexResult:
     async with session_factory() as session:
         candidate = await session.get(RetrievalProfileRecord, profile_id)
@@ -45,7 +52,22 @@ async def build_staging_index(
                 "STAGING_INDEX_NOT_INDEPENDENT",
                 "候选 Profile 必须使用独立于活动版本的向量索引",
             )
-        snapshot_before = await capture_corpus_snapshot(session, classification)
+        if release_id is None:
+            snapshot_before = await capture_corpus_snapshot(session, classification)
+        else:
+            release = await session.get(CorpusReleaseRecord, release_id)
+            if release is None or release.profile_id != profile_id:
+                raise RagError(
+                    "RELEASE_PROFILE_MISMATCH", "候选 Release 与 staging Profile 不匹配"
+                )
+            document_ids = tuple(
+                await session.scalars(
+                    select(CorpusReleaseDocumentRecord.document_id).where(
+                        CorpusReleaseDocumentRecord.release_id == release_id
+                    )
+                )
+            )
+            snapshot_before = await capture_document_snapshot(session, document_ids)
         stored_candidate.index_build_hash = None
         stored_candidate.index_build_corpus_hash = None
         stored_candidate.index_build_document_count = None
@@ -75,7 +97,11 @@ async def build_staging_index(
         document_ids=snapshot_before.document_ids,
     )
     async with session_factory() as session:
-        snapshot_after = await capture_corpus_snapshot(session, classification)
+        snapshot_after = (
+            await capture_corpus_snapshot(session, classification)
+            if release_id is None
+            else await capture_document_snapshot(session, snapshot_before.document_ids)
+        )
     if (
         result.document_count == 0
         or result.concurrent_indexing_count

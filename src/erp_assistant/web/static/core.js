@@ -7,6 +7,8 @@ export const state = {
   citations: [],
   pendingLifecycle: null,
   pilotAction: "enable",
+  releaseAction: "create",
+  activeReleaseId: null,
 };
 
 export const byId = (id) => document.getElementById(id);

@@ -353,7 +353,11 @@ async def _run_from_cli(args: argparse.Namespace) -> EvaluationReport:
             raise ValueError("Candidate profile activation is only available in local mode")
         registry = get_retrieval_runtime_registry()
         if getattr(args, "build_staging_index", False):
-            await build_staging_index(candidate_profile_id, registry)
+            await build_staging_index(
+                candidate_profile_id,
+                registry,
+                release_id=getattr(args, "candidate_release_id", None),
+            )
         return await evaluate_candidate_profile(
             args.dataset,
             candidate_profile_id,
@@ -499,10 +503,13 @@ async def _main() -> None:
     parser.add_argument("--parser-version", default="pdf-parser-v1")
     parser.add_argument("--chunk-version")
     parser.add_argument("--candidate-profile-id", type=UUID)
+    parser.add_argument("--candidate-release-id", type=UUID)
     parser.add_argument("--build-staging-index", action="store_true")
     args = parser.parse_args()
     if args.build_staging_index and args.candidate_profile_id is None:
         parser.error("--build-staging-index requires --candidate-profile-id")
+    if args.candidate_release_id is not None and not args.build_staging_index:
+        parser.error("--candidate-release-id requires --build-staging-index")
     report = await _run_from_cli(args)
     if args.report:
         report.write(args.report)

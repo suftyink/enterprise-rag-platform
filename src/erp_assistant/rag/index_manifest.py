@@ -1,6 +1,8 @@
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from hashlib import sha256
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select
@@ -50,6 +52,37 @@ async def capture_corpus_snapshot(
             .order_by(KnowledgeDocument.id)
         )
     ).all()
+    return _snapshot(rows)
+
+
+async def capture_document_snapshot(
+    session: AsyncSession,
+    document_ids: tuple[UUID, ...],
+) -> CorpusSnapshot:
+    if not document_ids:
+        return _snapshot(())
+    rows = (
+        await session.execute(
+            select(
+                KnowledgeDocument.id,
+                KnowledgeDocument.scope,
+                KnowledgeDocument.scope_id,
+                KnowledgeDocument.document_key,
+                KnowledgeDocument.version,
+                KnowledgeDocument.sha256,
+                KnowledgeDocument.governance_revision,
+            )
+            .where(KnowledgeDocument.id.in_(document_ids))
+            .order_by(KnowledgeDocument.id)
+        )
+    ).all()
+    if len(rows) != len(set(document_ids)):
+        raise ValueError("Release snapshot contains missing documents")
+    return _snapshot(rows)
+
+
+def _snapshot(rows: Sequence[Any]) -> CorpusSnapshot:
+    materialized = tuple(rows)
     payload = [
         {
             "id": str(row.id),
@@ -60,14 +93,13 @@ async def capture_corpus_snapshot(
             "sha256": row.sha256,
             "governanceRevision": row.governance_revision,
         }
-        for row in rows
+        for row in materialized
     ]
-    corpus_hash = sha256(
-        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    ).hexdigest()
     return CorpusSnapshot(
-        document_ids=tuple(row.id for row in rows),
-        corpus_hash=corpus_hash,
+        document_ids=tuple(row.id for row in materialized),
+        corpus_hash=sha256(
+            json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        ).hexdigest(),
     )
 
 

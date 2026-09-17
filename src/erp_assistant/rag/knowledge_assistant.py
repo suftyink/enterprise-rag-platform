@@ -16,6 +16,7 @@ from erp_assistant.identity import (
 )
 from erp_assistant.models.answer import KnowledgeAnswerFeedback, KnowledgeAnswerRun
 from erp_assistant.models.knowledge import KnowledgeDocument
+from erp_assistant.models.operations import CorpusReleaseDocumentRecord, CorpusReleaseRecord
 from erp_assistant.operations.contracts import NullTelemetry, Telemetry
 from erp_assistant.orchestration.providers import (
     ChatMessage,
@@ -551,11 +552,30 @@ class KnowledgeAssistant:
         authorized_scopes: tuple[KnowledgeScopeRef, ...],
     ) -> bool:
         async with self._sessions() as session:
+            release_id = await session.scalar(
+                select(CorpusReleaseRecord.id).where(
+                    CorpusReleaseRecord.status == "ACTIVE",
+                    CorpusReleaseRecord.data_classification
+                    == request.data_classification.value,
+                )
+            )
+            statement = select(KnowledgeDocument.id, KnowledgeDocument.version)
+            if release_id is None:
+                statement = statement.where(*retrieval_eligibility_filters())
+            else:
+                statement = statement.join(
+                    CorpusReleaseDocumentRecord,
+                    (CorpusReleaseDocumentRecord.document_id == KnowledgeDocument.id)
+                    & (CorpusReleaseDocumentRecord.release_id == release_id),
+                ).where(
+                    KnowledgeDocument.status == "READY",
+                    KnowledgeDocument.retention_status == "RETAINED",
+                    KnowledgeDocument.publication_status != "WITHDRAWN",
+                )
             rows = (
                 await session.execute(
-                    select(KnowledgeDocument.id, KnowledgeDocument.version).where(
+                    statement.where(
                         KnowledgeDocument.id.in_([item.document_id for item in evidence]),
-                        *retrieval_eligibility_filters(),
                         KnowledgeDocument.data_classification == request.data_classification.value,
                         authorized_scope_filter(authorized_scopes),
                     )

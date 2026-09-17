@@ -53,8 +53,8 @@
           <div class="view-heading">
             <div>
               <p class="eyebrow">EMPLOYEE ANSWER DESK</p>
-              <h1 id="ask-heading">从已发布知识中获得可核查答案</h1>
-              <p>系统只依据当前身份可见且已发布的资料回答；证据不足时会明确拒答。</p>
+              <h1 id="ask-heading">从当前活动知识版本中获得可核查答案</h1>
+              <p>系统只依据当前身份可见且已激活的 Release 回答；证据不足时会明确拒答。</p>
             </div>
             <span class="trace-label">TRACE <strong id="answer-trace">—</strong></span>
           </div>
@@ -98,8 +98,8 @@
           <div class="view-heading">
             <div>
               <p class="eyebrow">KNOWLEDGE GOVERNANCE</p>
-              <h1 id="governance-heading">文档入库与发布治理</h1>
-              <p>先核对解析警告和版本，再执行发布、撤回或回滚。</p>
+              <h1 id="governance-heading">文档入库与内容治理</h1>
+              <p>先核对解析警告和版本，再批准进入下一候选、撤回或回滚内容。</p>
             </div>
             <button id="refresh-documents" class="text-button" type="button">刷新列表</button>
           </div>
@@ -120,7 +120,7 @@
               <input id="document-key" name="documentKey" maxlength="128" required>
             </div>
             <div>
-              <label for="document-scope">发布范围</label>
+              <label for="document-scope">治理范围</label>
               <select id="document-scope" name="scope" required></select>
             </div>
             <button id="upload-button" class="primary-button" type="submit">上传并开始处理</button>
@@ -138,6 +138,30 @@
             </div>
           </div>
           <div id="pilot-evidence" class="evidence-card"></div>
+          <section class="release-panel" aria-labelledby="release-heading">
+            <div class="view-heading compact-heading">
+              <div>
+                <p class="eyebrow">CORPUS RELEASES</p>
+                <h2 id="release-heading">知识发布版本</h2>
+                <p>内容批准、版本激活和员工开放彼此独立。</p>
+              </div>
+              <button id="refresh-releases" class="text-button" type="button">刷新版本</button>
+            </div>
+            <form id="release-form" class="pilot-form">
+              <label for="release-version">候选版本</label>
+              <input id="release-version" name="releaseVersion" maxlength="128"
+                placeholder="例如：knowledge-2026-09-21">
+              <label for="release-profile-id">Profile ID</label>
+              <input id="release-profile-id" name="profileId" required
+                placeholder="STAGING 或首次迁移的 ACTIVE Profile UUID">
+              <div class="button-row">
+                <button class="secondary-button" type="submit" data-release-action="create">创建候选</button>
+                <button class="text-button" type="submit" data-release-action="bootstrap">迁移当前版本</button>
+              </div>
+              <span id="release-form-status" role="status" aria-live="polite"></span>
+            </form>
+            <div id="release-list" class="document-list" aria-live="polite"></div>
+          </section>
           <form id="pilot-form" class="pilot-form">
             <label for="pilot-scope">试点范围</label>
             <input id="pilot-scope" name="pilotScope" maxlength="255" required placeholder="例如：华东运营组 30 人">
@@ -147,6 +171,9 @@
             <input id="monitoring-owner" name="monitoringOwner" maxlength="128" required>
             <label for="rollback-owner">回滚负责人</label>
             <input id="rollback-owner" name="rollbackOwner" maxlength="128" required>
+            <label for="pilot-subjects">Canary 员工账号（逗号分隔）</label>
+            <input id="pilot-subjects" name="subjectIds" maxlength="2000"
+              placeholder="例如：employee-a, employee-b">
             <label for="pilot-reason">批准原因</label>
             <textarea id="pilot-reason" name="reason" maxlength="500" rows="3" required></textarea>
             <div class="button-row">

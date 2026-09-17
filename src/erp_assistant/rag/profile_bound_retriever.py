@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from erp_assistant.core.config import Settings
 from erp_assistant.identity import IdentityAccess
 from erp_assistant.models.knowledge import RetrievalProfileRecord
+from erp_assistant.models.operations import CorpusReleaseRecord
 from erp_assistant.operations.contracts import NullTelemetry, Telemetry
 from erp_assistant.rag.errors import RagDependencyError
 from erp_assistant.rag.retriever import KnowledgeRetriever, RetrievalOutcome, RetrievalRequest
@@ -33,12 +34,24 @@ class ProfileBoundRetriever:
     async def retrieve(self, request: RetrievalRequest) -> RetrievalOutcome:
         if not self._enforce_binding:
             return await self._retriever.retrieve(request)
-        active = await self._session.scalar(
-            select(RetrievalProfileRecord).where(
-                RetrievalProfileRecord.data_classification == request.data_classification.value,
-                RetrievalProfileRecord.status == "ACTIVE",
+        active_release = await self._session.scalar(
+            select(CorpusReleaseRecord).where(
+                CorpusReleaseRecord.data_classification == request.data_classification.value,
+                CorpusReleaseRecord.status == "ACTIVE",
             )
         )
+        if active_release is not None:
+            active = await self._session.get(
+                RetrievalProfileRecord, active_release.profile_id
+            )
+        else:
+            active = await self._session.scalar(
+                select(RetrievalProfileRecord).where(
+                    RetrievalProfileRecord.data_classification
+                    == request.data_classification.value,
+                    RetrievalProfileRecord.status == "ACTIVE",
+                )
+            )
         if active is None:
             raise RagDependencyError("ACTIVE_PROFILE_UNAVAILABLE", "没有已激活的检索 Profile")
         if self._runtime_registry is not None:

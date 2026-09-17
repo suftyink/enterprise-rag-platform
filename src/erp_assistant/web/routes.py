@@ -76,7 +76,7 @@ async def get_pilot_actor(
     actor: Annotated[ActorContext, Depends(get_web_actor)],
     gate: Annotated[PilotAccessGate, Depends(get_pilot_access_gate)],
 ) -> ActorContext:
-    await gate.require_enabled()
+    await gate.require_enabled(actor)
     return actor
 
 
@@ -165,7 +165,7 @@ async def web_feedback(
 
 @router.get("/internal/api/documents", response_model=list[KnowledgeDocumentResponse])
 async def web_documents(
-    actor: Annotated[ActorContext, Depends(get_pilot_actor)],
+    actor: Annotated[ActorContext, Depends(get_web_actor)],
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> list[KnowledgeDocumentResponse]:
     _require_admin(actor)
@@ -196,7 +196,7 @@ async def web_upload_document(
     request: Request,
     response: Response,
     file: Annotated[UploadFile, File()],
-    actor: Annotated[ActorContext, Depends(get_pilot_actor)],
+    actor: Annotated[ActorContext, Depends(get_web_actor)],
     access: Annotated[IdentityAccess, Depends(get_identity_access)],
     session: Annotated[AsyncSession, Depends(get_session)],
     settings: Annotated[Settings, Depends(get_settings)],
@@ -229,7 +229,7 @@ async def web_lifecycle(
     request: Request,
     document_id: UUID,
     payload: LifecycleWebRequest,
-    actor: Annotated[ActorContext, Depends(get_pilot_actor)],
+    actor: Annotated[ActorContext, Depends(get_web_actor)],
     corpus: Annotated[KnowledgeCorpus, Depends(get_web_knowledge_corpus)],
     _: Annotated[None, Depends(require_csrf)],
 ) -> dict[str, object]:
@@ -251,10 +251,10 @@ async def web_lifecycle(
 
 @router.get("/internal/api/pilot")
 async def web_pilot_status(
-    _: Annotated[ActorContext, Depends(get_web_actor)],
+    actor: Annotated[ActorContext, Depends(get_web_actor)],
     gate: Annotated[PilotAccessGate, Depends(get_pilot_access_gate)],
 ) -> dict[str, object]:
-    return (await gate.state()).to_dict()
+    return (await gate.state(actor)).to_dict()
 
 
 @router.post("/internal/api/pilot")

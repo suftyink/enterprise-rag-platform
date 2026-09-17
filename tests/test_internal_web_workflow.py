@@ -11,7 +11,8 @@ from uuid import UUID, uuid4
 
 import pytest
 import uvicorn
-from playwright.sync_api import Browser, Route, sync_playwright
+from playwright.sync_api import Browser, Page, Route, sync_playwright
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -24,8 +25,15 @@ from erp_assistant.identity.models import SecurityAuditEvent
 from erp_assistant.infrastructure.database import Base, get_session
 from erp_assistant.infrastructure.object_storage import get_object_storage
 from erp_assistant.main import app
-from erp_assistant.models.operations import PilotAccessRecord, PilotReadinessRecord
+from erp_assistant.models.knowledge import KnowledgeDocument, RetrievalProfileRecord
+from erp_assistant.models.operations import (
+    CorpusReleaseAuditRecord,
+    PilotAccessRecord,
+    PilotReadinessRecord,
+)
+from erp_assistant.operations.readiness_models import ReleaseIdentity
 from erp_assistant.rag.errors import RagDependencyError, RagError
+from erp_assistant.rag.index_manifest import build_manifest, capture_corpus_snapshot
 from erp_assistant.rag.knowledge_assistant import (
     AnswerCitation,
     AnswerDecision,
@@ -41,11 +49,13 @@ from erp_assistant.rag.knowledge_corpus_contracts import (
     LifecycleAction,
 )
 from erp_assistant.rag.types import (
+    DataClassification,
     DocumentStatus,
     PublicationStatus,
     RetentionStatus,
 )
 from erp_assistant.web.pilot import PilotAccessDecision, PilotAccessGate
+from erp_assistant.web.release_routes import get_release_knowledge_corpus
 from erp_assistant.web.routes import get_web_knowledge_corpus
 from erp_assistant.web.sessions import (
     OidcTransaction,
@@ -57,6 +67,9 @@ from erp_assistant.web.sessions import (
 from erp_assistant.workers.dispatcher import get_document_dispatcher
 
 CHROME = Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe")
+ACTIVE_PROFILE_ID = UUID("22222222-2222-2222-2222-222222222222")
+CANDIDATE_PROFILE_ID = UUID("33333333-3333-3333-3333-333333333333")
+RELEASE_DOCUMENT_ID = UUID("44444444-4444-4444-4444-444444444444")
 
 
 @dataclass
@@ -165,6 +178,16 @@ class FakeStorage:
 class FakeCorpus:
     transitions: list[tuple[UUID, LifecycleAction, str]] = field(default_factory=list)
 
+    async def inspect(
+        self,
+        document_id: UUID,
+        actor: object,
+        *,
+        trace_id: UUID,
+    ) -> CorpusDocumentView:
+        del actor, trace_id
+        return self._view(document_id, PublicationStatus.PUBLISHED)
+
     async def transition(
         self,
         document_id: UUID,
@@ -177,6 +200,13 @@ class FakeCorpus:
     ) -> CorpusDocumentView:
         del actor, expected_revision, trace_id
         self.transitions.append((document_id, action, reason))
+        return self._view(document_id, PublicationStatus.PUBLISHED)
+
+    @staticmethod
+    def _view(
+        document_id: UUID,
+        publication_status: PublicationStatus,
+    ) -> CorpusDocumentView:
         return CorpusDocumentView(
             document_id=document_id,
             document_key="pilot-guide",
@@ -187,7 +217,7 @@ class FakeCorpus:
             size_bytes=100,
             sha256="b" * 64,
             processing_status=DocumentStatus.READY,
-            publication_status=PublicationStatus.PUBLISHED,
+            publication_status=publication_status,
             retention_status=RetentionStatus.RETAINED,
             revision=1,
             retrieval_eligible=True,
@@ -211,6 +241,7 @@ class WebHarness:
     server: uvicorn.Server
     thread: threading.Thread
     engine: object
+    sessions: async_sessionmaker[AsyncSession]
 
 
 class NullAudit:
@@ -231,34 +262,37 @@ def internal_web_server(request: pytest.FixtureRequest) -> Iterator[WebHarness]:
             await connection.run_sync(Base.metadata.create_all)
         factory = async_sessionmaker(engine, expire_on_commit=False)
         report_id = UUID("11111111-1111-1111-1111-111111111111")
-        async with factory() as session:
-            session.add_all(
-                [
-                    PilotReadinessRecord(
-                        id=report_id,
-                        report_version="pilot-readiness-v1",
-                        release_version="spec10-test",
-                        release_fingerprint="a" * 64,
-                        decision="PASS",
-                        generated_at=datetime.now(UTC),
-                        payload={"decision": "PASS"},
-                    ),
-                    PilotAccessRecord(
-                        id=uuid4(),
-                        enabled=True,
-                        readiness_report_id=report_id,
-                        release_fingerprint="a" * 64,
-                        approved_by="system-admin",
-                        pilot_scope="内部验收组",
-                        capacity="10 RPS",
-                        monitoring_owner="ops-owner",
-                        rollback_owner="release-owner",
-                        reason="浏览器验收准备",
-                        created_at=datetime.now(UTC),
-                    ),
-                ]
-            )
-            await session.commit()
+        if "release_workflow" in request.node.name:
+            await _prepare_release_workflow(factory)
+        if "without_readiness" not in request.node.name:
+            async with factory() as session:
+                session.add_all(
+                    [
+                        PilotReadinessRecord(
+                            id=report_id,
+                            report_version="pilot-readiness-v1",
+                            release_version="spec10-test",
+                            release_fingerprint="a" * 64,
+                            decision="PASS",
+                            generated_at=datetime.now(UTC),
+                            payload={"decision": "PASS"},
+                        ),
+                        PilotAccessRecord(
+                            id=uuid4(),
+                            enabled=True,
+                            readiness_report_id=report_id,
+                            release_fingerprint="a" * 64,
+                            approved_by="system-admin",
+                            pilot_scope="内部验收组",
+                            capacity="10 RPS",
+                            monitoring_owner="ops-owner",
+                            rollback_owner="release-owner",
+                            reason="浏览器验收准备",
+                            created_at=datetime.now(UTC),
+                        ),
+                    ]
+                )
+                await session.commit()
         return factory
 
     sessions = asyncio.run(prepare())
@@ -299,6 +333,7 @@ def internal_web_server(request: pytest.FixtureRequest) -> Iterator[WebHarness]:
     app.dependency_overrides[get_web_session_store] = lambda: store
     app.dependency_overrides[get_knowledge_assistant] = lambda: assistant
     app.dependency_overrides[get_web_knowledge_corpus] = lambda: corpus
+    app.dependency_overrides[get_release_knowledge_corpus] = lambda: corpus
     app.dependency_overrides[get_session] = override_session
     app.dependency_overrides[get_object_storage] = lambda: storage
     app.dependency_overrides[get_document_dispatcher] = lambda: (
@@ -324,6 +359,7 @@ def internal_web_server(request: pytest.FixtureRequest) -> Iterator[WebHarness]:
         server=server,
         thread=thread,
         engine=engine,
+        sessions=sessions,
     )
     try:
         yield harness
@@ -365,6 +401,12 @@ def test_employee_answer_refusal_failure_feedback_and_safe_citations(
         })).status"""
     )
     assert forged_status == 403
+    release_status = page.evaluate(
+        """async () => (await fetch('/internal/api/releases', {
+          credentials: 'same-origin'
+        })).status"""
+    )
+    assert release_status == 403
     csrf_status = page.evaluate(
         """async () => (await fetch('/internal/api/answers', {
           method: 'POST',
@@ -484,7 +526,7 @@ def test_admin_upload_governance_confirmation_and_pilot_controls(
     page.unroute("**/internal/api/documents", advance_document_progress)
 
     for label, action in (
-        ("发布", LifecycleAction.PUBLISH),
+        ("批准入候选", LifecycleAction.PUBLISH),
         ("撤回", LifecycleAction.WITHDRAW),
         ("回滚", LifecycleAction.ROLLBACK),
     ):
@@ -504,6 +546,501 @@ def test_admin_upload_governance_confirmation_and_pilot_controls(
     page.get_by_role("button", name="关闭试点").click()
     page.get_by_text("试点已关闭，知识数据未删除").wait_for()
     assert internal_web_server.storage.objects
+
+
+def test_admin_governance_works_without_readiness_while_answers_remain_gated(
+    internal_web_server: WebHarness,
+    browser: Browser,
+) -> None:
+    page = browser.new_page(viewport={"width": 1280, "height": 860})
+    page.goto(f"{internal_web_server.base_url}/internal")
+    page.get_by_text("system-admin · tenant-a").wait_for()
+    page.get_by_text("员工问答暂未开放，知识治理仍可使用").wait_for()
+
+    page.get_by_role("button", name="知识治理").click()
+    page.get_by_label("选择资料").set_input_files(
+        {
+            "name": "bootstrap.md",
+            "mimeType": "text/markdown",
+            "buffer": "# 启动知识\n\n管理员可在试点关闭时准备候选语料。".encode(),
+        }
+    )
+    page.get_by_label("资料标题").fill("启动知识")
+    page.get_by_label("文档编号").fill("bootstrap-guide")
+    page.get_by_role("button", name="上传并开始处理").click()
+    page.get_by_text("已接收 启动知识").wait_for()
+
+    page.get_by_role("button", name="问答").click()
+    page.get_by_label("你的业务问题").fill("试点关闭时仍不能问答")
+    with page.expect_response(
+        lambda response: response.url.endswith("/internal/api/answers")
+    ) as response_info:
+        page.get_by_role("button", name="查询知识").click()
+    assert response_info.value.status == 503
+    page.get_by_text("内部试点当前未开放，请联系试点负责人").wait_for()
+    assert internal_web_server.storage.objects
+
+
+def test_admin_release_workflow_activates_canaries_rolls_back_and_withdraws(
+    internal_web_server: WebHarness,
+    browser: Browser,
+) -> None:
+    page = browser.new_page(viewport={"width": 1280, "height": 860})
+    page.goto(f"{internal_web_server.base_url}/internal")
+    page.get_by_text("system-admin · tenant-a").wait_for()
+    csrf = page.evaluate(
+        "async () => (await (await fetch('/internal/api/session')).json()).csrfToken"
+    )
+
+    bootstrap = _browser_api(
+        page,
+        csrf,
+        "/internal/api/releases/bootstrap",
+        {"profileId": str(ACTIVE_PROFILE_ID)},
+    )
+    assert bootstrap["status"] == "ACTIVE"
+
+    candidate = _browser_api(
+        page,
+        csrf,
+        "/internal/api/releases",
+        {
+            "releaseVersion": "spec11-candidate-v1",
+            "profileId": str(CANDIDATE_PROFILE_ID),
+        },
+    )
+    assert candidate["status"] == "BUILDING"
+    candidate_id = candidate["releaseId"]
+
+    assert _browser_api_error(
+        page,
+        csrf,
+        f"/internal/api/releases/{candidate_id}/sync-build",
+        {},
+    ) == (409, "CANDIDATE_BUILD_STALE")
+    _complete_candidate_build_sync(internal_web_server.sessions)
+    built = _browser_api(
+        page,
+        csrf,
+        f"/internal/api/releases/{candidate_id}/sync-build",
+        {},
+    )
+    assert built["status"] == "EVALUATING"
+
+    rejected = _browser_api_error(
+        page,
+        csrf,
+        f"/internal/api/releases/{candidate_id}/activate",
+        {
+            "pilotScope": "内部 QA",
+            "capacity": "10 RPS",
+            "monitoringOwner": "ops-owner",
+            "rollbackOwner": "release-owner",
+            "reason": "证据尚未绑定",
+        },
+    )
+    assert rejected == (409, "RELEASE_NOT_READY")
+
+    _set_candidate_report_sync(internal_web_server.sessions, stale=True)
+    assert _browser_api_error(
+        page,
+        csrf,
+        f"/internal/api/releases/{candidate_id}/readiness",
+        {},
+    ) == (409, "READINESS_REPORT_STALE")
+    _set_candidate_report_sync(internal_web_server.sessions, mismatch=True)
+    assert _browser_api_error(
+        page,
+        csrf,
+        f"/internal/api/releases/{candidate_id}/readiness",
+        {},
+    ) == (409, "RELEASE_EVIDENCE_MISMATCH")
+    _set_candidate_report_sync(internal_web_server.sessions)
+
+    ready = _browser_api(
+        page,
+        csrf,
+        f"/internal/api/releases/{candidate_id}/readiness",
+        {},
+    )
+    assert ready["status"] == "READY"
+    activated = _browser_api(
+        page,
+        csrf,
+        f"/internal/api/releases/{candidate_id}/activate",
+        {
+            "pilotScope": "内部 QA",
+            "capacity": "10 RPS",
+            "monitoringOwner": "ops-owner",
+            "rollbackOwner": "release-owner",
+            "reason": "候选证据通过",
+        },
+    )
+    assert activated["status"] == "ACTIVE"
+    assert activated["previousReleaseId"] == bootstrap["releaseId"]
+    assert activated["rolloutState"] == "DISABLED"
+
+    excluded_canary = _browser_api(
+        page,
+        csrf,
+        f"/internal/api/releases/{candidate_id}/rollout",
+        {
+            "state": "CANARY",
+            "subjectIds": ["another-employee"],
+            "reason": "先验证未命中员工保持关闭",
+        },
+    )
+    assert excluded_canary["rolloutState"] == "CANARY"
+    excluded_pilot = page.evaluate(
+        "async () => await (await fetch('/internal/api/pilot')).json()"
+    )
+    assert excluded_pilot["enabled"] is False
+    assert excluded_pilot["reasonCode"] == "PILOT_COHORT_DENIED"
+
+    canary = _browser_api(
+        page,
+        csrf,
+        f"/internal/api/releases/{candidate_id}/rollout",
+        {
+            "state": "CANARY",
+            "subjectIds": ["system-admin"],
+            "reason": "先对系统管理员开放",
+        },
+    )
+    assert canary["rolloutState"] == "CANARY"
+    pilot = page.evaluate("async () => await (await fetch('/internal/api/pilot')).json()")
+    assert pilot["enabled"] is True
+    assert pilot["releaseId"] == candidate_id
+
+    paused = _browser_api(
+        page,
+        csrf,
+        f"/internal/api/releases/{candidate_id}/rollout",
+        {"state": "PAUSED", "subjectIds": [], "reason": "观测窗口暂停"},
+    )
+    assert paused["rolloutState"] == "PAUSED"
+    paused_pilot = page.evaluate(
+        "async () => await (await fetch('/internal/api/pilot')).json()"
+    )
+    assert paused_pilot["enabled"] is False
+    assert paused_pilot["reasonCode"] == "PILOT_PAUSED"
+    assert isinstance(
+        page.evaluate("async () => await (await fetch('/internal/api/releases')).json()"),
+        list,
+    )
+
+    rolled_back = _browser_api(
+        page,
+        csrf,
+        f"/internal/api/releases/{bootstrap['releaseId']}/rollback",
+        {"reason": "演练回滚"},
+    )
+    assert rolled_back["status"] == "ACTIVE"
+    assert rolled_back["rolloutState"] == "PAUSED"
+
+    unrelated_document = UUID("66666666-6666-6666-6666-666666666666")
+    assert _browser_api_error(
+        page,
+        csrf,
+        (
+            f"/internal/api/releases/{bootstrap['releaseId']}/documents/"
+            f"{unrelated_document}/emergency-withdraw"
+        ),
+        {"reason": "不应影响非成员文档"},
+    ) == (409, "DOCUMENT_NOT_IN_RELEASE")
+    assert internal_web_server.corpus.transitions == []
+
+    degraded = _browser_api(
+        page,
+        csrf,
+        (
+            f"/internal/api/releases/{bootstrap['releaseId']}/documents/"
+            f"{RELEASE_DOCUMENT_ID}/emergency-withdraw"
+        ),
+        {"reason": "发现敏感内容"},
+    )
+    assert degraded["status"] == "DEGRADED"
+    assert degraded["rolloutState"] == "PAUSED"
+    assert degraded["degradedReason"] == "EMERGENCY_WITHDRAWAL"
+
+    releases = page.evaluate("async () => await (await fetch('/internal/api/releases')).json()")
+    assert {item["releaseVersion"] for item in releases} == {
+        "bootstrap-current-v1",
+        "spec11-candidate-v1",
+    }
+    audit_actions = _release_audit_actions_sync(internal_web_server.sessions)
+    assert {
+        "BOOTSTRAP",
+        "CREATE_CANDIDATE",
+        "BIND_READINESS",
+        "ACTIVATE",
+        "SET_ROLLOUT",
+        "ROLLBACK",
+        "EMERGENCY_WITHDRAWAL",
+    } <= audit_actions
+
+
+def _browser_api(
+    page: Page, csrf: str, path: str, payload: dict[str, object]
+) -> dict[str, object]:
+    result = page.evaluate(
+        """async ({path, csrf, payload}) => {
+          const response = await fetch(path, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrf},
+            body: JSON.stringify(payload)
+          });
+          const body = await response.json();
+          if (!response.ok) throw new Error(`${response.status}:${JSON.stringify(body)}`);
+          return body;
+        }""",
+        {"path": path, "csrf": csrf, "payload": payload},
+    )
+    assert isinstance(result, dict)
+    return result
+
+
+def _browser_api_error(
+    page: Page, csrf: str, path: str, payload: dict[str, object]
+) -> tuple[int, str]:
+    result = page.evaluate(
+        """async ({path, csrf, payload}) => {
+          const response = await fetch(path, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrf},
+            body: JSON.stringify(payload)
+          });
+          const body = await response.json();
+          return [response.status, body.detail.code];
+        }""",
+        {"path": path, "csrf": csrf, "payload": payload},
+    )
+    return int(result[0]), str(result[1])
+
+
+async def _release_audit_actions(
+    factory: async_sessionmaker[AsyncSession],
+) -> set[str]:
+    async with factory() as session:
+        return set(await session.scalars(select(CorpusReleaseAuditRecord.action)))
+
+
+def _release_audit_actions_sync(
+    factory: async_sessionmaker[AsyncSession],
+) -> set[str]:
+    results: list[set[str]] = []
+    errors: list[BaseException] = []
+
+    def load() -> None:
+        try:
+            results.append(asyncio.run(_release_audit_actions(factory)))
+        except BaseException as exc:  # pragma: no cover - re-raised in caller
+            errors.append(exc)
+
+    thread = threading.Thread(target=load)
+    thread.start()
+    thread.join(timeout=10)
+    if errors:
+        raise errors[0]
+    assert results
+    return results[0]
+
+
+async def _complete_candidate_build(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with factory() as session:
+        profile = await session.get_one(RetrievalProfileRecord, CANDIDATE_PROFILE_ID)
+        snapshot = await capture_corpus_snapshot(session, DataClassification.ORDINARY)
+        manifest = build_manifest(profile, snapshot)
+        profile.index_build_hash = manifest.build_hash
+        profile.index_build_corpus_hash = manifest.corpus_hash
+        profile.index_build_document_count = manifest.document_count
+        profile.index_build_completed_at = datetime.now(UTC)
+        await session.commit()
+
+
+def _complete_candidate_build_sync(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    errors: list[BaseException] = []
+
+    def update() -> None:
+        try:
+            asyncio.run(_complete_candidate_build(factory))
+        except BaseException as exc:  # pragma: no cover - re-raised in caller
+            errors.append(exc)
+
+    thread = threading.Thread(target=update)
+    thread.start()
+    thread.join(timeout=10)
+    if errors:
+        raise errors[0]
+
+
+async def _set_candidate_report(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    stale: bool = False,
+    mismatch: bool = False,
+) -> None:
+    async with factory() as session:
+        report = await session.scalar(
+            select(PilotReadinessRecord).where(
+                PilotReadinessRecord.release_version == "spec11-candidate-v1"
+            )
+        )
+        assert report is not None
+        report.generated_at = datetime.now(UTC) - (
+            timedelta(hours=25) if stale else timedelta()
+        )
+        payload = json.loads(json.dumps(report.payload))
+        release = payload["release"]
+        assert isinstance(release, dict)
+        release["indexBuildHash"] = (
+            "0" * 64
+            if mismatch
+            else build_manifest(
+                await session.get_one(RetrievalProfileRecord, CANDIDATE_PROFILE_ID),
+                await capture_corpus_snapshot(session, DataClassification.ORDINARY),
+            ).build_hash
+        )
+        report.payload = payload
+        await session.commit()
+
+
+def _set_candidate_report_sync(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    stale: bool = False,
+    mismatch: bool = False,
+) -> None:
+    errors: list[BaseException] = []
+
+    def update() -> None:
+        try:
+            asyncio.run(_set_candidate_report(factory, stale=stale, mismatch=mismatch))
+        except BaseException as exc:  # pragma: no cover - re-raised in caller
+            errors.append(exc)
+
+    thread = threading.Thread(target=update)
+    thread.start()
+    thread.join(timeout=10)
+    if errors:
+        raise errors[0]
+
+
+async def _prepare_release_workflow(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with factory() as session:
+        session.add(
+            KnowledgeDocument(
+                id=RELEASE_DOCUMENT_ID,
+                scope="TENANT",
+                scope_id="tenant-a",
+                tenant_id="tenant-a",
+                document_key="release-guide",
+                version=1,
+                title="发布指南",
+                original_filename="release.md",
+                media_type="text/markdown",
+                data_classification="ORDINARY",
+                size_bytes=100,
+                sha256="d" * 64,
+                object_key="knowledge/release.md",
+                status="READY",
+                active=True,
+                publication_status="PUBLISHED",
+                retention_status="RETAINED",
+                governance_revision=1,
+                index_artifacts_present=True,
+                created_by="system-admin",
+            )
+        )
+        profiles = [
+            RetrievalProfileRecord(
+                id=profile_id,
+                profile_key=key,
+                version=1,
+                data_classification="ORDINARY",
+                provider_boundary="INTERNAL",
+                embedding_deployment="embedding-v1",
+                embedding_model="embedding-model",
+                embedding_dimension=3,
+                rerank_deployment="rerank-v1",
+                rerank_model="rerank-model",
+                index_identity=index_identity,
+                parser_version="parser-v1",
+                chunk_version="chunk-v1",
+                retrieval_config={"rrfK": 60},
+                configuration_fingerprint="c" * 64,
+                production_ready=True,
+                status=status,
+            )
+            for profile_id, key, index_identity, status in (
+                (ACTIVE_PROFILE_ID, "current", "milvus-v3:current", "ACTIVE"),
+                (CANDIDATE_PROFILE_ID, "candidate", "milvus-v3:candidate", "STAGING"),
+            )
+        ]
+        session.add_all(profiles)
+        await session.commit()
+        snapshot = await capture_corpus_snapshot(session, DataClassification.ORDINARY)
+        candidate_manifest = None
+        for profile in profiles:
+            manifest = build_manifest(profile, snapshot)
+            if profile.id == CANDIDATE_PROFILE_ID:
+                candidate_manifest = manifest
+                continue
+            profile.index_build_hash = manifest.build_hash
+            profile.index_build_corpus_hash = manifest.corpus_hash
+            profile.index_build_document_count = manifest.document_count
+            profile.index_build_completed_at = datetime.now(UTC)
+        assert candidate_manifest is not None
+        identity = ReleaseIdentity(
+            release_version="spec11-candidate-v1",
+            dataset_version="pilot-dataset-v1",
+            dataset_hash="e" * 64,
+            index_identity=profiles[1].index_identity,
+            index_build_hash=candidate_manifest.build_hash,
+            parser_version=profiles[1].parser_version,
+            chunk_version=profiles[1].chunk_version,
+            configuration_fingerprint=profiles[1].configuration_fingerprint,
+            route_fingerprints=frozenset({"ORDINARY:retrieval-route-v1"}),
+            answer_route_fingerprints=frozenset({"ORDINARY:answer-route-v1"}),
+        )
+        report_id = UUID("55555555-5555-5555-5555-555555555555")
+        session.add(
+            PilotReadinessRecord(
+                id=report_id,
+                report_version="pilot-readiness-v1",
+                release_version=identity.release_version,
+                release_fingerprint=identity.fingerprint,
+                decision="PASS",
+                generated_at=datetime.now(UTC),
+                payload={
+                    "decision": "PASS",
+                    "release": {
+                        "releaseVersion": identity.release_version,
+                        "fingerprint": identity.fingerprint,
+                        "datasetVersion": identity.dataset_version,
+                        "datasetHash": identity.dataset_hash,
+                        "indexIdentity": identity.index_identity,
+                        "indexBuildHash": identity.index_build_hash,
+                        "parserVersion": identity.parser_version,
+                        "chunkVersion": identity.chunk_version,
+                        "configurationFingerprint": identity.configuration_fingerprint,
+                        "routeFingerprints": sorted(identity.route_fingerprints),
+                        "answerRouteFingerprints": sorted(
+                            identity.answer_route_fingerprints
+                        ),
+                    },
+                },
+            )
+        )
+        await session.commit()
 
 
 def _free_port() -> int:

@@ -8,8 +8,15 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from erp_assistant.core.config import Settings, get_settings
+from erp_assistant.identity import ActorContext
 from erp_assistant.infrastructure.database import get_session
-from erp_assistant.models.operations import PilotAccessRecord, PilotReadinessRecord
+from erp_assistant.models.operations import (
+    CorpusReleaseRecord,
+    PilotAccessRecord,
+    PilotReadinessRecord,
+    PilotRolloutRecord,
+)
+from erp_assistant.rag.types import DataClassification
 
 
 @dataclass(frozen=True)
@@ -25,6 +32,8 @@ class PilotGateState:
     capacity: str | None = None
     monitoring_owner: str | None = None
     rollback_owner: str | None = None
+    release_id: UUID | None = None
+    rollout_state: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -39,6 +48,8 @@ class PilotGateState:
             "capacity": self.capacity,
             "monitoringOwner": self.monitoring_owner,
             "rollbackOwner": self.rollback_owner,
+            "releaseId": str(self.release_id) if self.release_id else None,
+            "rolloutState": self.rollout_state,
         }
 
 
@@ -58,8 +69,22 @@ class PilotAccessGate:
         self._session = session
         self._settings = settings
 
-    async def state(self, *, now: datetime | None = None) -> PilotGateState:
+    async def state(
+        self,
+        actor: ActorContext | None = None,
+        *,
+        now: datetime | None = None,
+    ) -> PilotGateState:
         current_time = now or datetime.now(UTC)
+        release = await self._session.scalar(
+            select(CorpusReleaseRecord).where(
+                CorpusReleaseRecord.data_classification
+                == DataClassification.ORDINARY.value,
+                CorpusReleaseRecord.status.in_(["ACTIVE", "DEGRADED"])
+            )
+        )
+        if release is not None:
+            return await self._release_state(release, actor, current_time)
         report = await self._session.scalar(
             select(PilotReadinessRecord)
             .order_by(PilotReadinessRecord.generated_at.desc(), PilotReadinessRecord.id.desc())
@@ -95,8 +120,8 @@ class PilotAccessGate:
             )
         return _state(True, True, "PILOT_ENABLED", report, generated_at, approval)
 
-    async def require_enabled(self) -> PilotGateState:
-        state = await self.state()
+    async def require_enabled(self, actor: ActorContext | None = None) -> PilotGateState:
+        state = await self.state(actor)
         if not state.enabled:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -108,6 +133,45 @@ class PilotAccessGate:
         return state
 
     async def record(self, decision: PilotAccessDecision) -> PilotGateState:
+        release = await self._session.scalar(
+            select(CorpusReleaseRecord).where(
+                CorpusReleaseRecord.data_classification
+                == DataClassification.ORDINARY.value,
+                CorpusReleaseRecord.status == "ACTIVE",
+            )
+        )
+        if release is not None:
+            values = (
+                decision.pilot_scope,
+                decision.capacity,
+                decision.monitoring_owner,
+                decision.rollback_owner,
+                decision.reason,
+            )
+            if any(not value.strip() for value in values):
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail={"code": "PILOT_APPROVAL_INCOMPLETE", "message": "试点批准信息不完整"},
+                )
+            if decision.enabled:
+                await self._assert_release_ready(release)
+            release.pilot_scope = decision.pilot_scope.strip()
+            release.capacity = decision.capacity.strip()
+            release.monitoring_owner = decision.monitoring_owner.strip()
+            release.rollback_owner = decision.rollback_owner.strip()
+            self._session.add(
+                PilotRolloutRecord(
+                    id=uuid4(),
+                    release_id=release.id,
+                    state="ENABLED" if decision.enabled else "DISABLED",
+                    subject_ids=[],
+                    approved_by=decision.approved_by,
+                    reason=decision.reason.strip(),
+                    created_at=datetime.now(UTC),
+                )
+            )
+            await self._session.commit()
+            return await self.state()
         state = await self.state()
         if decision.enabled and not state.available:
             raise HTTPException(
@@ -149,6 +213,53 @@ class PilotAccessGate:
         await self._session.commit()
         return await self.state()
 
+    async def _release_state(
+        self,
+        release: CorpusReleaseRecord,
+        actor: ActorContext | None,
+        now: datetime,
+    ) -> PilotGateState:
+        if release.status == "DEGRADED":
+            return _release_gate_state(False, False, "RELEASE_DEGRADED", release)
+        if release.readiness_report_id is None or release.release_fingerprint is None:
+            return _release_gate_state(False, False, "READINESS_REPORT_MISSING", release)
+        report = await self._session.get(PilotReadinessRecord, release.readiness_report_id)
+        if report is None:
+            return _release_gate_state(False, False, "READINESS_REPORT_MISSING", release)
+        generated_at = _aware(report.generated_at)
+        if report.decision != "PASS":
+            return _release_gate_state(False, False, "READINESS_NOT_PASSING", release, report)
+        if now - generated_at > timedelta(hours=24):
+            return _release_gate_state(False, False, "READINESS_REPORT_STALE", release, report)
+        if report.release_fingerprint != release.release_fingerprint:
+            return _release_gate_state(
+                False, False, "RELEASE_FINGERPRINT_MISMATCH", release, report
+            )
+        rollout = await self._session.scalar(
+            select(PilotRolloutRecord)
+            .where(PilotRolloutRecord.release_id == release.id)
+            .order_by(PilotRolloutRecord.created_at.desc(), PilotRolloutRecord.id.desc())
+            .limit(1)
+        )
+        if rollout is None or rollout.state in {"DISABLED", "PAUSED"}:
+            reason = "PILOT_PAUSED" if rollout and rollout.state == "PAUSED" else "PILOT_DISABLED"
+            return _release_gate_state(False, True, reason, release, report, rollout)
+        if rollout.state == "CANARY" and (
+            actor is None or actor.subject_id not in set(rollout.subject_ids)
+        ):
+            return _release_gate_state(
+                False, True, "PILOT_COHORT_DENIED", release, report, rollout
+            )
+        return _release_gate_state(True, True, "PILOT_ENABLED", release, report, rollout)
+
+    async def _assert_release_ready(self, release: CorpusReleaseRecord) -> None:
+        state = await self._release_state(release, None, datetime.now(UTC))
+        if not state.available:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"code": state.reason_code, "message": "当前发布证据不允许开放试点"},
+            )
+
 
 def get_pilot_access_gate(
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -181,4 +292,29 @@ def _state(
         capacity=approval.capacity if approval else None,
         monitoring_owner=approval.monitoring_owner if approval else None,
         rollback_owner=approval.rollback_owner if approval else None,
+    )
+
+
+def _release_gate_state(
+    enabled: bool,
+    available: bool,
+    reason_code: str,
+    release: CorpusReleaseRecord,
+    report: PilotReadinessRecord | None = None,
+    rollout: PilotRolloutRecord | None = None,
+) -> PilotGateState:
+    return PilotGateState(
+        enabled=enabled,
+        available=available,
+        reason_code=reason_code,
+        report_id=report.id if report else release.readiness_report_id,
+        release_fingerprint=release.release_fingerprint,
+        generated_at=_aware(report.generated_at) if report else None,
+        approved_by=rollout.approved_by if rollout else release.approved_by,
+        pilot_scope=release.pilot_scope,
+        capacity=release.capacity,
+        monitoring_owner=release.monitoring_owner,
+        rollback_owner=release.rollback_owner,
+        release_id=release.id,
+        rollout_state=rollout.state if rollout else None,
     )

@@ -7,6 +7,7 @@ import {
   configureGovernance,
   loadDocuments,
   loadPilotStatus,
+  loadReleases,
 } from "./governance.js";
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -26,6 +27,7 @@ async function bootstrap() {
     byId("logout-button").hidden = false;
     configureForRoles(session);
     await loadPilotStatus();
+    if (session.roles.includes("SYSTEM_ADMIN")) await loadReleases();
   } catch (error) {
     if (error.status === 401) {
       window.location.replace("/internal/auth/login");

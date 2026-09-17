@@ -70,7 +70,7 @@ function renderRefusal(reason) {
   byId("answer-panel").hidden = true;
   const copy = reason === "CONFLICTING_EVIDENCE"
     ? "现有资料相互冲突，系统无法给出可靠结论。请联系知识管理员核对版本。"
-    : "当前已发布资料不足以支持这个问题。你可以补充条件，或请知识管理员完善资料。";
+    : "当前活动知识版本不足以支持这个问题。你可以补充条件，或请知识管理员完善资料。";
   setAnswerState(`证据不足：${copy}`, "refusal");
 }
 
@@ -174,7 +174,7 @@ async function submitFeedback(event) {
       method: "POST",
       body: JSON.stringify({ rating, reason: data.get("reason") || null }),
     });
-    byId("feedback-status").textContent = "反馈已记录，不会自动进入已发布知识。";
+    byId("feedback-status").textContent = "反馈已记录，不会自动进入获批候选知识。";
     form.querySelectorAll("input, textarea, button").forEach((control) => {
       control.disabled = true;
     });

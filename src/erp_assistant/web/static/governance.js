@@ -16,10 +16,17 @@ export function bindGovernanceWorkflows() {
   byId("upload-form").addEventListener("submit", uploadDocument);
   byId("refresh-documents").addEventListener("click", loadDocuments);
   byId("pilot-form").addEventListener("submit", managePilot);
+  byId("release-form").addEventListener("submit", createRelease);
+  byId("refresh-releases").addEventListener("click", loadReleases);
   byId("confirm-dialog").addEventListener("close", completeLifecycleConfirmation);
   document.querySelectorAll("[data-pilot-action]").forEach((button) => {
     button.addEventListener("click", () => {
       state.pilotAction = button.dataset.pilotAction;
+    });
+  });
+  document.querySelectorAll("[data-release-action]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.releaseAction = button.dataset.releaseAction;
     });
   });
 }
@@ -123,7 +130,11 @@ function documentCard(item) {
   const status = document.createElement("span");
   status.className = "status-chip";
   status.dataset.tone = item.publicationStatus === "PUBLISHED" ? "success" : "warning";
-  status.textContent = `${item.status} · ${item.publicationStatus}`;
+  const governanceStatus =
+    item.publicationStatus === "PUBLISHED"
+      ? "APPROVED_FOR_CANDIDATE"
+      : item.publicationStatus;
+  status.textContent = `${item.status} · ${governanceStatus}`;
   header.append(titleBlock, status);
   const meta = document.createElement("p");
   meta.className = "document-meta";
@@ -170,17 +181,38 @@ function documentCard(item) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = action === "PUBLISH" ? "secondary-button" : "danger-button";
-    button.textContent = { PUBLISH: "发布", WITHDRAW: "撤回", ROLLBACK: "回滚" }[action];
+    button.textContent = {
+      PUBLISH: "批准入候选",
+      WITHDRAW: "撤回",
+      ROLLBACK: "回滚",
+    }[action];
     button.addEventListener("click", () => confirmLifecycle(item, action));
     actions.append(button);
   });
+  if (
+    state.activeReleaseId &&
+    state.session?.roles.includes("SYSTEM_ADMIN") &&
+    item.publicationStatus !== "WITHDRAWN"
+  ) {
+    const emergency = document.createElement("button");
+    emergency.type = "button";
+    emergency.className = "danger-button";
+    emergency.textContent = "紧急撤回并暂停";
+    emergency.addEventListener("click", () => confirmLifecycle(item, "EMERGENCY_WITHDRAW"));
+    actions.append(emergency);
+  }
   article.append(actions);
   return article;
 }
 
 function confirmLifecycle(item, action) {
   state.pendingLifecycle = { document: item, action };
-  const names = { PUBLISH: "发布", WITHDRAW: "撤回", ROLLBACK: "回滚" };
+  const names = {
+    PUBLISH: "批准入候选",
+    WITHDRAW: "撤回",
+    ROLLBACK: "回滚",
+    EMERGENCY_WITHDRAW: "紧急撤回并暂停活动版本",
+  };
   byId("confirm-copy").textContent = [
     `确认${names[action]}“${item.title}” v${item.version}？`,
     `作用范围：${item.scope}，当前治理 revision：${item.governanceRevision}。`,
@@ -199,20 +231,33 @@ async function completeLifecycleConfirmation() {
     return;
   }
   try {
-    const result = await api(`/internal/api/documents/${pending.document.documentId}/lifecycle`, {
+    const emergency = pending.action === "EMERGENCY_WITHDRAW";
+    const path = emergency
+      ? `/internal/api/releases/${state.activeReleaseId}/documents/${pending.document.documentId}/emergency-withdraw`
+      : `/internal/api/documents/${pending.document.documentId}/lifecycle`;
+    const result = await api(path, {
       method: "POST",
-      body: JSON.stringify({
-        action: pending.action,
-        reason,
-        expectedRevision: pending.document.governanceRevision,
-      }),
+      body: JSON.stringify(
+        emergency
+          ? { reason }
+          : {
+              action: pending.action,
+              reason,
+              expectedRevision: pending.document.governanceRevision,
+            },
+      ),
     });
-    const names = { PUBLISH: "发布", WITHDRAW: "撤回", ROLLBACK: "回滚" };
+    const names = {
+      PUBLISH: "批准入候选",
+      WITHDRAW: "撤回",
+      ROLLBACK: "回滚",
+      EMERGENCY_WITHDRAW: "紧急撤回并暂停活动版本",
+    };
     showGlobal(
       `${names[pending.action]}操作已完成并写入审计。trace ${result.traceId}`,
       "success",
     );
-    await loadDocuments();
+    await Promise.all([loadDocuments(), loadReleases(), loadPilotStatus()]);
   } catch (error) {
     showGlobal(`治理操作失败：${error.message}`, "error");
   }
@@ -236,10 +281,123 @@ export async function loadPilotStatus() {
     badge.dataset.tone = pilot.enabled ? "success" : "warning";
     renderPilotEvidence(pilot);
     if (!pilot.enabled) {
-      showGlobal(`试点门禁：${pilot.reasonCode}。问答和治理暂不可用。`, "warning");
+      showGlobal(
+        `试点门禁：${pilot.reasonCode}。员工问答暂未开放，知识治理仍可使用。`,
+        "warning",
+      );
     }
   } catch (error) {
     showGlobal(`无法读取试点状态：${error.message}`, "error");
+  }
+}
+
+export async function loadReleases() {
+  if (!state.session?.roles.includes("SYSTEM_ADMIN")) return;
+  const list = byId("release-list");
+  list.replaceChildren(statusParagraph("正在读取发布版本…"));
+  try {
+    const releases = await api("/internal/api/releases", { method: "GET" });
+    const previousActiveReleaseId = state.activeReleaseId;
+    state.activeReleaseId =
+      releases.find((release) => release.status === "ACTIVE")?.releaseId || null;
+    list.replaceChildren();
+    if (!releases.length) {
+      list.append(statusParagraph("尚未建立 CorpusRelease，请先迁移当前活动 Profile。"));
+      return;
+    }
+    releases.forEach((release) => list.append(releaseCard(release)));
+    if (previousActiveReleaseId !== state.activeReleaseId) await loadDocuments();
+  } catch (error) {
+    list.replaceChildren(statusParagraph(`发布版本读取失败：${error.message}`));
+  }
+}
+
+function releaseCard(release) {
+  const article = document.createElement("article");
+  article.className = "document-card";
+  const title = document.createElement("h3");
+  title.textContent = release.releaseVersion;
+  const status = document.createElement("span");
+  status.className = "status-chip";
+  status.dataset.tone = release.status === "ACTIVE" ? "success" : "warning";
+  status.textContent = `${release.status} · ${release.rolloutState}`;
+  const identity = document.createElement("p");
+  identity.className = "document-meta";
+  identity.textContent = [
+    `${release.documentCount} documents`,
+    release.indexIdentity,
+    `corpus ${release.corpusHash.slice(0, 12)}`,
+    release.releaseFingerprint ? `release ${release.releaseFingerprint.slice(0, 12)}` : "尚未绑定 readiness",
+  ].join(" · ");
+  const actions = document.createElement("div");
+  actions.className = "document-actions";
+  const available = [];
+  if (release.status === "BUILDING") available.push(["同步构建", "sync-build"]);
+  if (release.status === "EVALUATING") available.push(["绑定 Readiness", "readiness"]);
+  if (release.status === "READY") available.push(["激活", "activate"]);
+  if (release.status === "ROLLBACK") available.push(["回滚至此", "rollback"]);
+  if (["ACTIVE", "DEGRADED"].includes(release.status)) {
+    available.push(["Canary", "canary"], ["全面开放", "enabled"], ["暂停", "paused"]);
+  }
+  available.forEach(([label, action]) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = action === "activate" ? "primary-button" : "secondary-button";
+    button.textContent = label;
+    button.addEventListener("click", () => manageRelease(release, action));
+    actions.append(button);
+  });
+  article.append(title, status, identity, actions);
+  return article;
+}
+
+async function createRelease(event) {
+  event.preventDefault();
+  const profileId = byId("release-profile-id").value.trim();
+  const releaseVersion = byId("release-version").value.trim();
+  const bootstrap = state.releaseAction === "bootstrap";
+  try {
+    const result = await api(bootstrap ? "/internal/api/releases/bootstrap" : "/internal/api/releases", {
+      method: "POST",
+      body: JSON.stringify(bootstrap ? { profileId } : { profileId, releaseVersion }),
+    });
+    byId("release-form-status").textContent = bootstrap
+      ? `当前版本已迁移：${result.releaseVersion}`
+      : `候选已创建：${result.releaseVersion}`;
+    await loadReleases();
+  } catch (error) {
+    byId("release-form-status").textContent = `发布版本操作失败：${error.message}`;
+  }
+}
+
+async function manageRelease(release, action) {
+  const pilot = new FormData(byId("pilot-form"));
+  let path = `/internal/api/releases/${release.releaseId}/${action}`;
+  let body = {};
+  if (action === "activate") {
+    body = {
+      pilotScope: pilot.get("pilotScope"),
+      capacity: pilot.get("capacity"),
+      monitoringOwner: pilot.get("monitoringOwner"),
+      rollbackOwner: pilot.get("rollbackOwner"),
+      reason: pilot.get("reason"),
+    };
+  } else if (["canary", "enabled", "paused"].includes(action)) {
+    path = `/internal/api/releases/${release.releaseId}/rollout`;
+    body = {
+      state: action.toUpperCase(),
+      subjectIds: String(pilot.get("subjectIds") || "").split(",").map((item) => item.trim()).filter(Boolean),
+      reason: pilot.get("reason") || `将 rollout 调整为 ${action}`,
+    };
+  } else if (action === "rollback") {
+    body = { reason: pilot.get("reason") || "管理员执行回滚" };
+  }
+  try {
+    await api(path, { method: "POST", body: JSON.stringify(body) });
+    showGlobal(`发布操作 ${action} 已完成。`, "success");
+    await Promise.all([loadReleases(), loadPilotStatus()]);
+  } catch (error) {
+    showGlobal(`发布操作失败：${error.message}`, "error");
   }
 }
 

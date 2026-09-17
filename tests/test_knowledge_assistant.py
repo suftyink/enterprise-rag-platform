@@ -2,6 +2,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -11,7 +12,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import StaticPool
 
 from erp_assistant.infrastructure.database import Base
-from erp_assistant.models.knowledge import KnowledgeDocument
+from erp_assistant.models.knowledge import KnowledgeDocument, RetrievalProfileRecord
+from erp_assistant.models.operations import (
+    CorpusReleaseDocumentRecord,
+    CorpusReleaseRecord,
+)
 from erp_assistant.orchestration.providers import (
     ChatMessage,
     ChatResult,
@@ -192,6 +197,72 @@ async def published_evidence(
     )
 
 
+async def activate_release_for_evidence(
+    sessions: async_sessionmaker[AsyncSession], evidence: RetrievalEvidence
+) -> None:
+    profile_id = uuid4()
+    release_id = uuid4()
+    now = datetime.now(UTC)
+    async with sessions() as session:
+        document = await session.get_one(KnowledgeDocument, evidence.document_id)
+        document.active = False
+        document.publication_status = "SUPERSEDED"
+        session.add(
+            RetrievalProfileRecord(
+                id=profile_id,
+                profile_key="release-answer-profile",
+                version=1,
+                data_classification="ORDINARY",
+                provider_boundary="INTERNAL",
+                embedding_deployment="embedding-v1",
+                embedding_model="embedding-model",
+                embedding_dimension=3,
+                rerank_deployment="rerank-v1",
+                rerank_model="rerank-model",
+                index_identity="release-index-v1",
+                parser_version="parser-v1",
+                chunk_version="chunk-v1",
+                retrieval_config={},
+                configuration_fingerprint="c" * 64,
+                production_ready=True,
+                status="ACTIVE",
+            )
+        )
+        session.add(
+            CorpusReleaseRecord(
+                id=release_id,
+                release_version="answer-release-v1",
+                status="ACTIVE",
+                data_classification="ORDINARY",
+                corpus_generation=1,
+                corpus_hash="a" * 64,
+                document_count=1,
+                profile_id=profile_id,
+                index_identity="release-index-v1",
+                index_build_hash="b" * 64,
+                parser_version="parser-v1",
+                chunk_version="chunk-v1",
+                configuration_fingerprint="c" * 64,
+                route_fingerprints=[],
+                answer_route_fingerprints=[],
+                created_by="release-owner",
+                created_at=now,
+                updated_at=now,
+                activated_at=now,
+            )
+        )
+        session.add(
+            CorpusReleaseDocumentRecord(
+                release_id=release_id,
+                document_id=evidence.document_id,
+                document_sha256=document.sha256,
+                governance_revision=document.governance_revision,
+                created_at=now,
+            )
+        )
+        await session.commit()
+
+
 @pytest.mark.asyncio
 async def test_ask_returns_answer_with_code_bound_citation(
     answer_sessions: async_sessionmaker[AsyncSession],
@@ -237,6 +308,38 @@ async def test_ask_returns_answer_with_code_bound_citation(
     assert outcome.citations[0].title == "Returns Policy"
     assert outcome.citations[0].source_locator == evidence.source_locator
     assert outcome.citations[0].excerpt == evidence.content
+
+
+@pytest.mark.asyncio
+async def test_active_release_keeps_frozen_superseded_evidence_current(
+    answer_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    evidence = await published_evidence(answer_sessions)
+    await activate_release_for_evidence(answer_sessions, evidence)
+    assistant = KnowledgeAssistant(
+        retriever=DeterministicRetriever(retrieval_outcome((evidence,))),
+        chat_routes={
+            DataClassification.ORDINARY: StructuredChat(
+                {
+                    "decision": "ANSWERED",
+                    "answerUnits": [
+                        {"text": "The frozen policy still applies.", "evidenceIds": ["E1"]}
+                    ],
+                }
+            )
+        },
+        session_factory=answer_sessions,
+    )
+
+    outcome = await assistant.ask(
+        AnswerRequest(
+            question="Does the frozen release remain stable?",
+            actor=ActorContext(subject_id="employee-a", tenant_id="tenant-a"),
+        )
+    )
+
+    assert outcome.decision is AnswerDecision.ANSWERED
+    assert outcome.citations[0].document_id == evidence.document_id
 
 
 @pytest.mark.asyncio

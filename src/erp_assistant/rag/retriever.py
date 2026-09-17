@@ -20,6 +20,7 @@ from erp_assistant.identity import (
     KnowledgeScopeRef,
 )
 from erp_assistant.models.knowledge import KnowledgeChunk, KnowledgeDocument
+from erp_assistant.models.operations import CorpusReleaseDocumentRecord, CorpusReleaseRecord
 from erp_assistant.operations.contracts import NullTelemetry, Telemetry
 from erp_assistant.orchestration.providers import (
     EmbeddingProvider,
@@ -301,13 +302,33 @@ class KnowledgeRetriever:
             return ()
 
         try:
+            release_id = await self._session.scalar(
+                select(CorpusReleaseRecord.id).where(
+                    CorpusReleaseRecord.status == "ACTIVE",
+                    CorpusReleaseRecord.data_classification
+                    == request.data_classification.value,
+                    CorpusReleaseRecord.index_identity == self.index_identity,
+                )
+            )
+            statement = select(KnowledgeChunk, KnowledgeDocument).join(
+                KnowledgeDocument, KnowledgeDocument.id == KnowledgeChunk.document_id
+            )
+            if release_id is None:
+                statement = statement.where(*retrieval_eligibility_filters())
+            else:
+                statement = statement.join(
+                    CorpusReleaseDocumentRecord,
+                    (CorpusReleaseDocumentRecord.document_id == KnowledgeDocument.id)
+                    & (CorpusReleaseDocumentRecord.release_id == release_id),
+                ).where(
+                    KnowledgeDocument.status == "READY",
+                    KnowledgeDocument.retention_status == "RETAINED",
+                    KnowledgeDocument.publication_status != "WITHDRAWN",
+                )
             rows = (
                 await self._session.execute(
-                    select(KnowledgeChunk, KnowledgeDocument)
-                    .join(KnowledgeDocument, KnowledgeDocument.id == KnowledgeChunk.document_id)
-                    .where(
+                    statement.where(
                         KnowledgeChunk.id.in_([hit.chunk_id for hit in hits]),
-                        *retrieval_eligibility_filters(),
                         KnowledgeDocument.data_classification == request.data_classification.value,
                         KnowledgeChunk.embedding_model == self._embedding.model,
                         KnowledgeChunk.embedding_deployment

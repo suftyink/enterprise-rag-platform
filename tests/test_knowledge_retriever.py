@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
@@ -16,7 +17,15 @@ from erp_assistant.identity import (
     SecurityAuditEvent,
 )
 from erp_assistant.infrastructure.database import Base
-from erp_assistant.models.knowledge import KnowledgeChunk, KnowledgeDocument
+from erp_assistant.models.knowledge import (
+    KnowledgeChunk,
+    KnowledgeDocument,
+    RetrievalProfileRecord,
+)
+from erp_assistant.models.operations import (
+    CorpusReleaseDocumentRecord,
+    CorpusReleaseRecord,
+)
 from erp_assistant.operations.telemetry import OperationalTelemetry, RecordingTelemetryExporter
 from erp_assistant.orchestration.fake_providers import (
     FakeEmbeddingProvider,
@@ -153,6 +162,102 @@ async def test_retrieve_returns_typed_evidence_for_a_permitted_document(
     assert outcome.run.retrieval == "dense-bm25-rrf-v1"
     assert outcome.run.embedding_model == "fake-lexical-v1"
     assert outcome.run.rerank_model == "fake-lexical-rerank-v2"
+
+
+@pytest.mark.asyncio
+async def test_active_release_filters_membership_and_emergency_withdrawal(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    included = _ready_document("TENANT", "tenant-a", "frozen-policy")
+    included.active = False
+    included.publication_status = "SUPERSEDED"
+    excluded = _ready_document("TENANT", "tenant-a", "future-policy")
+    included_chunk = _chunk(included, "Frozen release evidence remains eligible.")
+    excluded_chunk = _chunk(excluded, "Future evidence must not leak into the release.")
+    vector_store = RecordingVectorStore(
+        hits=[
+            VectorHit(chunk_id=included_chunk.id, score=0.9),
+            VectorHit(chunk_id=excluded_chunk.id, score=0.8),
+        ]
+    )
+    profile_id = uuid4()
+    release_id = uuid4()
+    now = datetime.now(UTC)
+    async with session_factory() as session:
+        session.add_all([included, excluded, included_chunk, excluded_chunk])
+        session.add(
+            RetrievalProfileRecord(
+                id=profile_id,
+                profile_key="release-retrieval-profile",
+                version=1,
+                data_classification="ORDINARY",
+                provider_boundary="INTERNAL",
+                embedding_deployment="local-fake",
+                embedding_model="fake-lexical-v1",
+                embedding_dimension=FakeEmbeddingProvider.dimension,
+                rerank_deployment="local-fake",
+                rerank_model="fake-lexical-rerank-v2",
+                index_identity="knowledge_chunks_hybrid_v2",
+                parser_version="parser-v1",
+                chunk_version="chunk-v1",
+                retrieval_config={},
+                configuration_fingerprint="c" * 64,
+                production_ready=True,
+                status="ACTIVE",
+            )
+        )
+        session.add(
+            CorpusReleaseRecord(
+                id=release_id,
+                release_version="retrieval-release-v1",
+                status="ACTIVE",
+                data_classification="ORDINARY",
+                corpus_generation=1,
+                corpus_hash="a" * 64,
+                document_count=1,
+                profile_id=profile_id,
+                index_identity="knowledge_chunks_hybrid_v2",
+                index_build_hash="b" * 64,
+                parser_version="parser-v1",
+                chunk_version="chunk-v1",
+                configuration_fingerprint="c" * 64,
+                route_fingerprints=[],
+                answer_route_fingerprints=[],
+                created_by="release-owner",
+                created_at=now,
+                updated_at=now,
+                activated_at=now,
+            )
+        )
+        session.add(
+            CorpusReleaseDocumentRecord(
+                release_id=release_id,
+                document_id=included.id,
+                document_sha256=included.sha256,
+                governance_revision=1,
+                created_at=now,
+            )
+        )
+        await session.commit()
+        retriever = KnowledgeRetriever(
+            session=session,
+            vector_store=vector_store,
+            embedding=FakeEmbeddingProvider(),
+            reranker=FakeRerankProvider(),
+            settings=Settings(rag_enabled=True),
+        )
+        request = RetrievalRequest(
+            query="release evidence",
+            actor=ActorContext(subject_id="user-a", tenant_id="tenant-a"),
+        )
+
+        frozen = await retriever.retrieve(request)
+        included.publication_status = "WITHDRAWN"
+        await session.commit()
+        withdrawn = await retriever.retrieve(request)
+
+    assert [item.document_key for item in frozen.evidence] == ["frozen-policy"]
+    assert withdrawn.decision is SearchDecision.INSUFFICIENT_KNOWLEDGE
 
 
 @pytest.mark.asyncio

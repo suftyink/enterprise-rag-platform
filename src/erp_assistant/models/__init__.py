@@ -12,7 +12,14 @@ from erp_assistant.models.knowledge import (
     KnowledgeVectorArtifact,
     RetrievalProfileRecord,
 )
-from erp_assistant.models.operations import PilotAccessRecord, PilotReadinessRecord
+from erp_assistant.models.operations import (
+    CorpusReleaseAuditRecord,
+    CorpusReleaseDocumentRecord,
+    CorpusReleaseRecord,
+    PilotAccessRecord,
+    PilotReadinessRecord,
+    PilotRolloutRecord,
+)
 from erp_assistant.models.security import SecurityAuditRecord
 from erp_assistant.models.task import AiTask, AiTaskMessage
 
@@ -29,8 +36,12 @@ __all__ = [
     "KnowledgeIndexJob",
     "KnowledgeLifecycleEvent",
     "KnowledgeVectorArtifact",
+    "CorpusReleaseDocumentRecord",
+    "CorpusReleaseAuditRecord",
+    "CorpusReleaseRecord",
     "PilotReadinessRecord",
     "PilotAccessRecord",
+    "PilotRolloutRecord",
     "RetrievalProfileRecord",
     "SecurityAuditRecord",
 ]
