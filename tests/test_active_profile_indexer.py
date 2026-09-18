@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
@@ -9,6 +10,7 @@ from sqlalchemy.pool import StaticPool
 
 from erp_assistant.infrastructure.database import Base
 from erp_assistant.models.knowledge import KnowledgeDocument, RetrievalProfileRecord
+from erp_assistant.models.operations import KnowledgeInitializationRunRecord
 from erp_assistant.rag.classified_indexer import ActiveProfileDocumentIndexer
 from erp_assistant.rag.document_indexer import (
     DocumentIndexOutcome,
@@ -152,3 +154,112 @@ async def test_incremental_indexing_follows_the_active_profile_after_switch(
     await processor.index(document_id)
 
     assert calls == ["v1", "v2"]
+
+
+@pytest.mark.asyncio
+async def test_first_run_documents_use_the_owned_staging_profile(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    now = datetime.now(UTC)
+    document_id = uuid4()
+    profile_id = uuid4()
+    run_id = uuid4()
+    async with session_factory() as session:
+        session.add_all(
+            [
+                KnowledgeDocument(
+                    id=document_id,
+                    scope="TENANT",
+                    scope_id="tenant-a",
+                    tenant_id="tenant-a",
+                    document_key="first-run-policy",
+                    version=1,
+                    title="First-run policy",
+                    original_filename="policy.pdf",
+                    media_type="application/pdf",
+                    data_classification=DataClassification.ORDINARY.value,
+                    size_bytes=10,
+                    sha256="b" * 64,
+                    object_key="knowledge/first-run-policy.pdf",
+                    status=DocumentStatus.QUEUED.value,
+                    active=True,
+                    publication_status="PUBLISHED",
+                    retention_status="RETAINED",
+                    created_by="author-a",
+                ),
+                RetrievalProfileRecord(
+                    id=profile_id,
+                    profile_key="first-run",
+                    version=1,
+                    data_classification=DataClassification.ORDINARY.value,
+                    provider_boundary="CLOUD",
+                    embedding_deployment="embed-v1",
+                    embedding_model="embedding",
+                    embedding_dimension=3,
+                    rerank_deployment="rerank-v1",
+                    rerank_model="reranker",
+                    index_identity="index-first-run",
+                    parser_version="pypdf-v1",
+                    chunk_version="chunk-v1",
+                    retrieval_config={},
+                    configuration_fingerprint="fingerprint-first-run",
+                    production_ready=True,
+                    status="STAGING",
+                ),
+                RetrievalProfileRecord(
+                    id=uuid4(),
+                    profile_key="legacy-active",
+                    version=1,
+                    data_classification=DataClassification.ORDINARY.value,
+                    provider_boundary="CLOUD",
+                    embedding_deployment="embed-legacy",
+                    embedding_model="embedding",
+                    embedding_dimension=3,
+                    rerank_deployment="rerank-legacy",
+                    rerank_model="reranker",
+                    index_identity="index-legacy",
+                    parser_version="pypdf-v1",
+                    chunk_version="chunk-v1",
+                    retrieval_config={},
+                    configuration_fingerprint="fingerprint-legacy",
+                    production_ready=True,
+                    status="ACTIVE",
+                ),
+                KnowledgeInitializationRunRecord(
+                    id=run_id,
+                    data_classification=DataClassification.ORDINARY.value,
+                    mode="FRESH",
+                    stage="WAITING_FOR_CONTENT",
+                    status="WAITING",
+                    attempt=1,
+                    idempotency_key="first-run",
+                    profile_id=profile_id,
+                    actor_id="system-admin",
+                    trace_id=uuid4(),
+                    retryable=False,
+                    progress=60,
+                    revision=3,
+                    created_at=now,
+                    updated_at=now,
+                ),
+            ]
+        )
+        await session.commit()
+
+    calls: list[str] = []
+    processor = ActiveProfileDocumentIndexer(
+        session_factory,
+        Registry(),  # type: ignore[arg-type]
+        lambda binding: RecordingIndexer(binding, calls),  # type: ignore[arg-type,return-value]
+    )
+
+    outcome = await processor.index(document_id)
+    async with session_factory() as session:
+        run = await session.get_one(KnowledgeInitializationRunRecord, run_id)
+        run.status = "QUEUED"
+        run.stage = "CANDIDATE_BUILD"
+        await session.commit()
+    await processor.index(document_id)
+
+    assert outcome.status is DocumentStatus.READY
+    assert calls == ["first-run", "legacy-active"]

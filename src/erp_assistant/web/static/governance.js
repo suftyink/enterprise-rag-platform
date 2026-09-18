@@ -16,17 +16,18 @@ export function bindGovernanceWorkflows() {
   byId("upload-form").addEventListener("submit", uploadDocument);
   byId("refresh-documents").addEventListener("click", loadDocuments);
   byId("pilot-form").addEventListener("submit", managePilot);
-  byId("release-form").addEventListener("submit", createRelease);
   byId("refresh-releases").addEventListener("click", loadReleases);
+  byId("refresh-initialization").addEventListener("click", loadInitialization);
+  byId("initialization-classification").addEventListener("change", loadInitialization);
+  byId("start-initialization").addEventListener("click", startInitialization);
+  byId("migrate-initialization").addEventListener("click", migrateInitialization);
+  byId("continue-initialization").addEventListener("click", continueInitialization);
+  byId("retry-initialization").addEventListener("click", retryInitialization);
+  byId("cancel-initialization").addEventListener("click", cancelInitialization);
   byId("confirm-dialog").addEventListener("close", completeLifecycleConfirmation);
   document.querySelectorAll("[data-pilot-action]").forEach((button) => {
     button.addEventListener("click", () => {
       state.pilotAction = button.dataset.pilotAction;
-    });
-  });
-  document.querySelectorAll("[data-release-action]").forEach((button) => {
-    button.addEventListener("click", () => {
-      state.releaseAction = button.dataset.releaseAction;
     });
   });
 }
@@ -293,6 +294,7 @@ export async function loadPilotStatus() {
 
 export async function loadReleases() {
   if (!state.session?.roles.includes("SYSTEM_ADMIN")) return;
+  await loadInitialization();
   const list = byId("release-list");
   list.replaceChildren(statusParagraph("正在读取发布版本…"));
   try {
@@ -302,7 +304,7 @@ export async function loadReleases() {
       releases.find((release) => release.status === "ACTIVE")?.releaseId || null;
     list.replaceChildren();
     if (!releases.length) {
-      list.append(statusParagraph("尚未建立 CorpusRelease，请先迁移当前活动 Profile。"));
+      list.append(statusParagraph("尚未建立 CorpusRelease，请先完成知识库初始化和候选发布。"));
       return;
     }
     releases.forEach((release) => list.append(releaseCard(release)));
@@ -358,22 +360,161 @@ function releaseCard(release) {
   return article;
 }
 
-async function createRelease(event) {
-  event.preventDefault();
-  const profileId = byId("release-profile-id").value.trim();
-  const releaseVersion = byId("release-version").value.trim();
-  const bootstrap = state.releaseAction === "bootstrap";
+export async function loadInitialization() {
+  if (!state.session?.roles.includes("SYSTEM_ADMIN")) return;
+  const classification = byId("initialization-classification").value;
   try {
-    const result = await api(bootstrap ? "/internal/api/releases/bootstrap" : "/internal/api/releases", {
-      method: "POST",
-      body: JSON.stringify(bootstrap ? { profileId } : { profileId, releaseVersion }),
-    });
-    byId("release-form-status").textContent = bootstrap
-      ? `当前版本已迁移：${result.releaseVersion}`
-      : `候选已创建：${result.releaseVersion}`;
-    await loadReleases();
+    const result = await api(
+      `/internal/api/initialization?dataClassification=${encodeURIComponent(classification)}`,
+      { method: "GET" },
+    );
+    state.initialization = result;
+    renderInitialization(result);
   } catch (error) {
-    byId("release-form-status").textContent = `发布版本操作失败：${error.message}`;
+    byId("initialization-status").replaceChildren(
+      statusParagraph(`初始化状态读取失败：${error.message}`),
+    );
+  }
+}
+
+export function renderInitialization(result) {
+  const container = byId("initialization-status");
+  const runtime = byId("initialization-runtime");
+  const selected = runtime.value;
+  runtime.replaceChildren();
+  if (result.runtimeOptions.length > 1) {
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = "请选择 Runtime Deployment";
+    placeholder.disabled = true;
+    placeholder.selected = true;
+    runtime.append(placeholder);
+  }
+  result.runtimeOptions.forEach((item) => {
+    const option = document.createElement("option");
+    option.value = item.key;
+    option.textContent = item.label;
+    runtime.append(option);
+  });
+  if (Array.from(runtime.options).some((item) => item.value === selected)) {
+    runtime.value = selected;
+  }
+  const run = result.run;
+  if (
+    !run
+    || run.status === "CANCELLED"
+    || run.status === "SUCCEEDED"
+    || (run.status === "FAILED" && !run.retryable)
+  ) {
+    state.initializationKey = null;
+  }
+  const message = run
+    ? `${run.stage} · ${run.status} · Attempt ${run.attempt} · ${run.progress}%${
+      run.failureCode ? ` · ${run.failureCode}` : ""
+    }${run.nextAction === "UPLOAD_AND_APPROVE_CONTENT" ? " · 上传并治理文档" : ""}`
+    : result.action === "MIGRATE"
+      ? "检测到历史 ACTIVE Profile，可执行迁移。"
+      : result.action === "MANAGE_RELEASES"
+        ? "首次初始化已完成，请使用下方发布流程。"
+        : "尚未初始化知识库。";
+  container.replaceChildren(statusParagraph(message));
+  byId("start-initialization").hidden = result.action !== "INITIALIZE";
+  byId("migrate-initialization").hidden = result.action !== "MIGRATE";
+  byId("continue-initialization").hidden = !(
+    run?.status === "WAITING" && run?.stage === "WAITING_FOR_CONTENT"
+  );
+  byId("retry-initialization").hidden = !(run?.status === "FAILED" && run.retryable);
+  byId("cancel-initialization").hidden = !["QUEUED", "RUNNING", "WAITING"].includes(
+    run?.status,
+  );
+  runtime.disabled = result.action !== "INITIALIZE" || result.runtimeOptions.length < 2;
+}
+
+async function migrateInitialization() {
+  if (!state.initializationKey?.startsWith("migration-")) {
+    state.initializationKey = `migration-${crypto.randomUUID()}`;
+  }
+  try {
+    await api("/internal/api/initialization/migrate", {
+      method: "POST",
+      body: JSON.stringify({
+        dataClassification: byId("initialization-classification").value,
+        idempotencyKey: state.initializationKey,
+      }),
+    });
+    await Promise.all([loadInitialization(), loadReleases()]);
+  } catch (error) {
+    showGlobal(`历史版本迁移失败：${error.message}`, "error");
+    await loadInitialization();
+  }
+}
+
+async function continueInitialization() {
+  const run = state.initialization?.run;
+  const releaseVersion = byId("initialization-release-version").value.trim();
+  if (!run || !releaseVersion) {
+    showGlobal("请填写首个候选版本。", "error");
+    return;
+  }
+  try {
+    await api(`/internal/api/initialization/${run.runId}/continue`, {
+      method: "POST",
+      body: JSON.stringify({ releaseVersion, expectedRevision: run.revision }),
+    });
+    showGlobal("首个候选已冻结并进入后台构建。", "success");
+    await Promise.all([loadInitialization(), loadReleases()]);
+  } catch (error) {
+    showGlobal(`候选构建启动失败：${error.message}`, "error");
+    await loadInitialization();
+  }
+}
+
+async function startInitialization() {
+  const runtimeKey = byId("initialization-runtime").value;
+  if (!runtimeKey) {
+    showGlobal("请选择一个初始化 Runtime。", "error");
+    return;
+  }
+  if (!state.initializationKey?.startsWith("web-")) {
+    state.initializationKey = `web-${crypto.randomUUID()}`;
+  }
+  try {
+    await api("/internal/api/initialization", {
+      method: "POST",
+      body: JSON.stringify({
+        dataClassification: byId("initialization-classification").value,
+        runtimeKey,
+        idempotencyKey: state.initializationKey,
+      }),
+    });
+    showGlobal("知识库候选资源已初始化，等待首批审核内容。", "success");
+    await loadInitialization();
+  } catch (error) {
+    showGlobal(`初始化失败：${error.message}`, "error");
+    await loadInitialization();
+  }
+}
+
+async function retryInitialization() {
+  await mutateInitialization("retry");
+}
+
+async function cancelInitialization() {
+  await mutateInitialization("cancel");
+}
+
+async function mutateInitialization(action) {
+  const run = state.initialization?.run;
+  if (!run) return;
+  try {
+    await api(`/internal/api/initialization/${run.runId}/${action}`, {
+      method: "POST",
+      body: JSON.stringify({ expectedRevision: run.revision }),
+    });
+    await loadInitialization();
+  } catch (error) {
+    showGlobal(`初始化${action === "retry" ? "重试" : "取消"}失败：${error.message}`, "error");
+    await loadInitialization();
   }
 }
 

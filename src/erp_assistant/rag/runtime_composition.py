@@ -7,6 +7,10 @@ from erp_assistant.core.config import (
     Settings,
     get_settings,
 )
+from erp_assistant.orchestration.fake_providers import (
+    FakeEmbeddingProvider,
+    FakeRerankProvider,
+)
 from erp_assistant.orchestration.http_retrieval_providers import (
     HttpEmbeddingProvider,
     HttpRerankProvider,
@@ -36,6 +40,34 @@ from erp_assistant.rag.vector_store import MilvusVectorStore
 def build_retrieval_runtime_registry(settings: Settings) -> RetrievalRuntimeRegistry:
     _validate_runtime_deployments(settings)
     bindings: list[RetrievalRuntimeBinding] = []
+    if settings.app_env.casefold() not in {"prod", "production"}:
+        for classification in (
+            DataClassification.ORDINARY,
+            DataClassification.RESTRICTED,
+        ):
+            fake_embedding = FakeEmbeddingProvider()
+            collection = (
+                settings.restricted_milvus_collection
+                if classification is DataClassification.RESTRICTED
+                else settings.milvus_collection
+            )
+            bindings.append(
+                RetrievalRuntimeBinding(
+                    data_classification=classification,
+                    vector_store=MilvusVectorStore(
+                        uri=settings.milvus_uri,
+                        collection=collection,
+                        dimension=fake_embedding.dimension,
+                        embedding_binding=embedding_binding_fingerprint(fake_embedding),
+                    ),
+                    embedding=fake_embedding,
+                    reranker=FakeRerankProvider(),
+                    settings=settings,
+                    parser_version="pypdf-v1",
+                    chunk_version="structured-window-v1",
+                    allow_non_production=True,
+                )
+            )
     for deployment in settings.retrieval_runtime_deployments:
         classification = DataClassification(deployment.data_classification)
         boundary = ProviderBoundary(deployment.provider_boundary)

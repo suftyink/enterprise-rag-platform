@@ -82,3 +82,32 @@ class ReleaseRolloutWebRequest(BaseModel):
     state: Literal["DISABLED", "CANARY", "ENABLED", "PAUSED"]
     subject_ids: list[str] = Field(alias="subjectIds", default_factory=list, max_length=500)
     reason: str = Field(min_length=1, max_length=500)
+
+
+class InitializationStartWebRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    data_classification: Literal["ORDINARY", "RESTRICTED"] = Field(
+        default="ORDINARY", alias="dataClassification"
+    )
+    runtime_key: str = Field(alias="runtimeKey", min_length=1, max_length=128)
+    idempotency_key: str = Field(alias="idempotencyKey", min_length=1, max_length=128)
+
+
+class InitializationMutationWebRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    expected_revision: int = Field(alias="expectedRevision", ge=0)
+
+
+class InitializationMigrateWebRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    data_classification: Literal["ORDINARY", "RESTRICTED"] = Field(
+        default="ORDINARY", alias="dataClassification"
+    )
+    idempotency_key: str = Field(alias="idempotencyKey", min_length=1, max_length=128)
+
+
+class InitializationContinueWebRequest(InitializationMutationWebRequest):
+    release_version: str = Field(alias="releaseVersion", min_length=1, max_length=128)

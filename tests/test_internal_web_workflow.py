@@ -35,6 +35,7 @@ from erp_assistant.models.operations import (
 from erp_assistant.operations.readiness_models import ReleaseIdentity
 from erp_assistant.rag.errors import RagDependencyError, RagError
 from erp_assistant.rag.index_manifest import build_manifest, capture_corpus_snapshot
+from erp_assistant.rag.index_provisioning import InMemoryIndexProvisioner
 from erp_assistant.rag.knowledge_assistant import (
     AnswerCitation,
     AnswerDecision,
@@ -55,6 +56,7 @@ from erp_assistant.rag.types import (
     PublicationStatus,
     RetentionStatus,
 )
+from erp_assistant.web.initialization_routes import get_initialization_index_provisioner
 from erp_assistant.web.pilot import PilotAccessDecision, PilotAccessGate
 from erp_assistant.web.release_routes import get_release_knowledge_corpus
 from erp_assistant.web.routes import get_web_knowledge_corpus
@@ -345,6 +347,9 @@ def internal_web_server(request: pytest.FixtureRequest) -> Iterator[WebHarness]:
     app.dependency_overrides[get_document_dispatcher] = lambda: (
         lambda document_id, trace_id: f"task-{document_id}-{trace_id}"
     )
+    app.dependency_overrides[get_initialization_index_provisioner] = (
+        lambda: InMemoryIndexProvisioner()
+    )
 
     port = _free_port()
     server = uvicorn.Server(
@@ -585,6 +590,109 @@ def test_admin_governance_works_without_readiness_while_answers_remain_gated(
     assert response_info.value.status == 503
     page.get_by_text("内部试点当前未开放，请联系试点负责人").wait_for()
     assert internal_web_server.storage.objects
+
+
+def test_admin_first_run_initialization_without_readiness_requires_no_profile_id(
+    internal_web_server: WebHarness,
+    browser: Browser,
+) -> None:
+    page = browser.new_page(viewport={"width": 1280, "height": 860})
+    page.goto(f"{internal_web_server.base_url}/internal")
+    page.get_by_text("system-admin · tenant-a").wait_for()
+    page.get_by_role("button", name="试点门禁").click()
+
+    page.get_by_role("heading", name="知识库初始化").wait_for()
+    assert page.get_by_label("Profile ID").count() == 0
+    selection = page.evaluate("""async () => {
+      const module = await import('/internal/assets/governance.js');
+      module.renderInitialization({
+        action: 'INITIALIZE',
+        run: null,
+        runtimeOptions: [
+          {key: 'runtime-a', label: 'Runtime A'},
+          {key: 'runtime-b', label: 'Runtime B'},
+        ],
+      });
+      const runtime = document.getElementById('initialization-runtime');
+      const observed = {
+        value: runtime.value,
+        options: Array.from(runtime.options).map((item) => item.textContent),
+      };
+      await module.loadInitialization();
+      return observed;
+    }""")
+    assert selection == {
+        "value": "",
+        "options": ["请选择 Runtime Deployment", "Runtime A", "Runtime B"],
+    }
+    missing_csrf = page.evaluate("""async () => {
+      const status = await (await fetch(
+        '/internal/api/initialization?dataClassification=ORDINARY'
+      )).json();
+      const response = await fetch('/internal/api/initialization', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          dataClassification: 'ORDINARY',
+          idempotencyKey: 'missing-csrf',
+          runtimeKey: status.runtimeOptions[0].key,
+        }),
+      });
+      return response.status;
+    }""")
+    assert missing_csrf == 403
+    page.get_by_role("button", name="初始化知识库").click()
+    page.get_by_text("WAITING_FOR_CONTENT").wait_for()
+    page.get_by_text("上传并治理文档").wait_for()
+
+    status = page.evaluate("""async () => await (await fetch(
+      '/internal/api/initialization?dataClassification=ORDINARY'
+    )).json()""")
+    assert status["action"] == "CONTINUE_INITIALIZATION"
+    assert status["run"]["profileId"]
+    assert status["run"]["status"] == "WAITING"
+
+    page.reload()
+    page.get_by_text("system-admin · tenant-a").wait_for()
+    page.get_by_role("button", name="试点门禁").click()
+    page.get_by_text("WAITING_FOR_CONTENT").wait_for()
+    assert page.get_by_role("button", name="取消初始化").is_visible()
+
+    page.get_by_role("button", name="取消初始化").click()
+    page.get_by_text("CANCELLED").wait_for()
+    with page.expect_response(
+        lambda response: response.url.endswith("/internal/api/initialization")
+        and response.request.method == "POST"
+    ) as response_info:
+        page.get_by_role("button", name="初始化知识库").click()
+    assert response_info.value.status == 200, response_info.value.text()
+    replacement_post = response_info.value.json()
+    assert replacement_post["runId"] != status["run"]["runId"]
+    page.get_by_text("WAITING_FOR_CONTENT").wait_for()
+    replacement = page.evaluate("""async () => await (await fetch(
+      '/internal/api/initialization?dataClassification=ORDINARY'
+    )).json()""")
+    assert replacement["run"]["runId"] != status["run"]["runId"]
+    assert replacement["run"]["profileId"] != status["run"]["profileId"]
+
+
+def test_employee_cannot_access_knowledge_initialization(
+    internal_web_server: WebHarness,
+    browser: Browser,
+) -> None:
+    page = browser.new_page(viewport={"width": 1280, "height": 860})
+    page.goto(f"{internal_web_server.base_url}/internal")
+    page.get_by_text("employee-user · tenant-a").wait_for()
+
+    response = page.evaluate("""async () => {
+      const result = await fetch(
+        '/internal/api/initialization?dataClassification=ORDINARY'
+      );
+      return {status: result.status, body: await result.json()};
+    }""")
+
+    assert response["status"] == 403
+    assert response["body"]["detail"]["code"] == "RESOURCE_NOT_FOUND"
 
 
 def test_admin_release_workflow_activates_canaries_rolls_back_and_withdraws(

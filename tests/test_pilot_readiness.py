@@ -519,7 +519,7 @@ async def test_unavailable_production_probes_return_evidence_instead_of_raising(
     def unavailable_worker() -> bool:
         raise TimeoutError("worker unavailable")
 
-    def unavailable_index(settings: Settings) -> bool:
+    async def unavailable_index(settings: Settings) -> bool:
         del settings
         raise ConnectionError("milvus unavailable")
 
@@ -537,6 +537,97 @@ async def test_unavailable_production_probes_return_evidence_instead_of_raising(
     assert decisions["database_migrations"] is GateDecision.INDETERMINATE
     assert decisions["worker"] is GateDecision.INDETERMINATE
     assert decisions["index_dimensions"] is GateDecision.INDETERMINATE
+
+
+@pytest.mark.asyncio
+async def test_model_route_probe_requires_configured_endpoints_to_be_reachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        app_env="production",
+        chat_provider="http",
+        ordinary_chat_base_url="https://chat.example/v1",
+        ordinary_chat_deployment="chat-prod",
+        ordinary_chat_model="grounded-chat",
+        ordinary_chat_version="v1",
+        retrieval_runtime_deployments=[
+            {
+                "data_classification": "ORDINARY",
+                "provider_boundary": "CLOUD",
+                "parser_version": "pypdf-v1",
+                "chunk_version": "structured-window-v1",
+                "embedding": {
+                    "base_url": "https://embedding.example/v1",
+                    "deployment": "embed-prod",
+                    "model": "semantic-embed",
+                    "version": "v1",
+                    "dimension": 1536,
+                },
+                "reranker": {
+                    "base_url": "https://rerank.example/v1",
+                    "deployment": "rerank-prod",
+                    "model": "semantic-rerank",
+                    "version": "v1",
+                },
+                "vector_index": {
+                    "uri": "http://milvus.internal:19530",
+                    "collection": "ordinary-production",
+                },
+            }
+        ],
+    )
+    observed: list[tuple[str, str, bool]] = []
+
+    async def probe(
+        url: str,
+        path: str,
+        payload: dict[str, object],
+        api_key: str,
+        probe_timeout: float,
+        *,
+        response_kind: str,
+        expected_dimension: int | None,
+    ) -> bool:
+        del payload, api_key, probe_timeout, response_kind, expected_dimension
+        observed.append((url, path, path.startswith("/")))
+        return path != "/rerank"
+
+    monkeypatch.setattr(production_probes, "_probe_model_endpoint", probe)
+
+    assert await production_probes._model_routes_reachable(settings) is False
+    assert set(observed) == {
+        ("https://embedding.example/v1", "/embeddings", True),
+        ("https://rerank.example/v1", "/rerank", True),
+        ("https://chat.example/v1", "chat/completions", False),
+    }
+
+
+@pytest.mark.parametrize(
+    ("body", "kind", "dimension", "expected"),
+    [
+        ({"data": [{"embedding": [0.1, 0.2]}]}, "embedding", 2, True),
+        ({"data": [{"embedding": [0.1]}]}, "embedding", 2, False),
+        ({"results": [{"index": 0, "relevance_score": 0.9}]}, "rerank", None, True),
+        ({"results": [{"index": 0}]}, "rerank", None, False),
+        ({"choices": [{"message": {"content": "{}"}}]}, "chat", None, True),
+        ({"choices": []}, "chat", None, False),
+        ("not-json-object", "chat", None, False),
+    ],
+)
+def test_model_probe_validates_each_provider_response_contract(
+    body: object,
+    kind: str,
+    dimension: int | None,
+    expected: bool,
+) -> None:
+    assert (
+        production_probes._model_probe_response_valid(
+            body,
+            response_kind=kind,
+            expected_dimension=dimension,
+        )
+        is expected
+    )
 
 
 def test_production_identity_allows_pre_registered_rollback_binding() -> None:
@@ -712,6 +803,58 @@ def test_production_startup_fails_closed_before_serving_requests() -> None:
             Settings(app_env="production"),
             observed_at=NOW,
         )
+
+
+def test_fresh_production_startup_does_not_require_a_release_fingerprint() -> None:
+    settings = Settings(
+        app_env="production",
+        identity_provider="oidc",
+        oidc_issuer="https://identity.example.test",
+        oidc_audience="erp-assistant",
+        oidc_jwks_url="https://identity.example.test/keys",
+        oidc_authorization_url="https://identity.example.test/authorize",
+        oidc_token_url="https://identity.example.test/token",
+        oidc_client_id="erp-assistant-web",
+        identity_memberships_json=(
+            '{"system-admin":{"tenantId":"tenant-a",'
+            '"roles":["SYSTEM_ADMIN"],"knowledgeScopes":[]}}'
+        ),
+        chat_provider="http",
+        ordinary_chat_base_url="https://models.example.test/v1",
+        ordinary_chat_deployment="chat-prod",
+        ordinary_chat_model="grounded-chat",
+        ordinary_chat_version="v1",
+        retrieval_runtime_deployments=[
+            {
+                "data_classification": "ORDINARY",
+                "provider_boundary": "CLOUD",
+                "parser_version": "pypdf-v1",
+                "chunk_version": "structured-window-v1",
+                "embedding": {
+                    "base_url": "https://models.example.test/v1",
+                    "deployment": "embed-prod",
+                    "model": "semantic-embed",
+                    "version": "v1",
+                    "dimension": 1536,
+                },
+                "reranker": {
+                    "base_url": "https://models.example.test/v1",
+                    "deployment": "rerank-prod",
+                    "model": "semantic-rerank",
+                    "version": "v1",
+                },
+                "vector_index": {
+                    "uri": "http://milvus.internal:19530",
+                    "collection": "ordinary-production",
+                },
+            }
+        ],
+    )
+
+    evidence = validate_production_startup(settings, observed_at=NOW)
+
+    assert evidence is not None
+    assert settings.pilot_release_fingerprint == ""
 
 
 class FakeRedis:

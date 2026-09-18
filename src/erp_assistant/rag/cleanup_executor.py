@@ -8,7 +8,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from erp_assistant.infrastructure.object_storage import ObjectStorage
-from erp_assistant.models.knowledge import KnowledgeCleanupRequest, KnowledgeDocument
+from erp_assistant.models.knowledge import (
+    KnowledgeCleanupRequest,
+    KnowledgeDocument,
+    RetrievalProfileRecord,
+)
 from erp_assistant.rag.document_indexer import VectorWriter
 from erp_assistant.rag.knowledge_corpus import (
     SYSTEM_CORPUS_ACTOR,
@@ -16,6 +20,7 @@ from erp_assistant.rag.knowledge_corpus import (
     KnowledgeCorpus,
     LifecycleAction,
 )
+from erp_assistant.rag.runtime_registry import RetrievalRuntimeRegistry
 from erp_assistant.rag.types import CleanupStatus, DataClassification
 
 
@@ -53,12 +58,14 @@ class KnowledgeCleanupExecutor:
             DataClassification, VectorWriter | tuple[VectorWriter, ...]
         ]
         | None = None,
+        runtime_registry: RetrievalRuntimeRegistry | None = None,
         corpus: KnowledgeCorpus,
     ) -> None:
         self._sessions = session_factory
         self._storage = storage
         self._vectors = vectors
         self._classified_vectors = dict(vectors_by_classification or {})
+        self._runtime_registry = runtime_registry
         self._corpus = corpus
 
     async def execute(self, document_id: UUID) -> CleanupOutcome:
@@ -113,6 +120,15 @@ class KnowledgeCleanupExecutor:
                     KnowledgeDocument.id == document_id
                 )
             )
+            profiles = tuple(
+                (
+                    await session.scalars(
+                        select(RetrievalProfileRecord).where(
+                            RetrievalProfileRecord.data_classification == classification
+                        )
+                    )
+                ).all()
+            )
         if classification is None:
             raise CleanupRetryableError("清理目标文档不存在")
         try:
@@ -120,6 +136,11 @@ class KnowledgeCleanupExecutor:
         except (KeyError, ValueError) as exc:
             raise CleanupRetryableError("文档分类没有对应的向量清理路由") from exc
         writers = configured if isinstance(configured, tuple) else (configured,)
+        if self._runtime_registry is not None:
+            writers += self._runtime_registry.vector_stores_for(
+                DataClassification(classification),
+                profiles,
+            )
         return {writer.identity: writer for writer in writers}
 
     async def _claim(self, document_id: UUID) -> KnowledgeCleanupRequest | None:

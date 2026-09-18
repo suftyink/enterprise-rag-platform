@@ -102,8 +102,6 @@ def validate_production_startup(
         for check in evidence.checks
         if check.name in startup_checks and check.decision is not GateDecision.PASS
     )
-    if not settings.pilot_release_fingerprint:
-        failed += ("pilot_release_fingerprint",)
     if failed:
         raise RuntimeError(f"Production startup configuration invalid: {','.join(failed)}")
     return evidence

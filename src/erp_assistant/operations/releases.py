@@ -44,7 +44,12 @@ class CorpusReleaseWorkflow:
         return await self._store.list()
 
     async def bootstrap(
-        self, profile_id: UUID, *, actor_id: str, trace_id: UUID
+        self,
+        profile_id: UUID,
+        *,
+        actor_id: str,
+        trace_id: UUID,
+        commit: bool = True,
     ) -> CorpusReleaseView:
         profile = await self._store.profile(profile_id)
         existing = await self._session.scalar(
@@ -56,6 +61,11 @@ class CorpusReleaseWorkflow:
             )
         )
         if existing is not None:
+            if existing.profile_id != profile_id:
+                raise ReleaseError(
+                    "BOOTSTRAP_ACTIVE_RELEASE_CONFLICT",
+                    "当前分类已有绑定其他 Profile 的活动 Release",
+                )
             return await self._store.view(existing)
         if profile.status != "ACTIVE":
             raise ReleaseError("BOOTSTRAP_PROFILE_NOT_ACTIVE", "只能从活动 Profile 初始化 Release")
@@ -83,7 +93,10 @@ class CorpusReleaseWorkflow:
             reason_code="BOOTSTRAP_VALIDATED",
             trace_id=trace_id,
         )
-        await self._session.commit()
+        if commit:
+            await self._session.commit()
+        else:
+            await self._session.flush()
         return await self._store.view(release)
 
     async def create_candidate(
@@ -93,6 +106,7 @@ class CorpusReleaseWorkflow:
         *,
         actor_id: str,
         trace_id: UUID,
+        commit: bool = True,
     ) -> CorpusReleaseView:
         if not release_version.strip():
             raise ReleaseError("RELEASE_VERSION_REQUIRED", "候选发布版本不能为空")
@@ -139,11 +153,19 @@ class CorpusReleaseWorkflow:
             reason_code="CANDIDATE_FROZEN",
             trace_id=trace_id,
         )
-        await self._session.commit()
+        if commit:
+            await self._session.commit()
+        else:
+            await self._session.flush()
         return await self._store.view(release)
 
     async def sync_build(
-        self, release_id: UUID, *, actor_id: str, trace_id: UUID
+        self,
+        release_id: UUID,
+        *,
+        actor_id: str,
+        trace_id: UUID,
+        commit: bool = True,
     ) -> CorpusReleaseView:
         release = await self._store.release(release_id, lock=True)
         if release.status not in {
@@ -164,7 +186,10 @@ class CorpusReleaseWorkflow:
             reason_code="BUILD_VERIFIED",
             trace_id=trace_id,
         )
-        await self._session.commit()
+        if commit:
+            await self._session.commit()
+        else:
+            await self._session.flush()
         return await self._store.view(release)
 
     async def bind_readiness(

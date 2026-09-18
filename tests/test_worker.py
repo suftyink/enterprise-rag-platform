@@ -49,8 +49,16 @@ def test_health_task_is_registered_and_side_effect_free() -> None:
     celery_app.finalize()
     assert "erp_assistant.health" in celery_app.tasks
     assert "erp_assistant.observe_index_queue" in celery_app.tasks
+    assert "erp_assistant.build_knowledge_initialization" in celery_app.tasks
+    assert "erp_assistant.sweep_knowledge_initializations" in celery_app.tasks
     assert celery_app.conf.beat_schedule["observe-index-queue-every-minute"] == {
         "task": "erp_assistant.observe_index_queue",
+        "schedule": 60.0,
+    }
+    assert celery_app.conf.beat_schedule[
+        "sweep-knowledge-initializations-every-minute"
+    ] == {
+        "task": "erp_assistant.sweep_knowledge_initializations",
         "schedule": 60.0,
     }
     assert health.run() == {"status": "ok"}

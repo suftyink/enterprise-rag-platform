@@ -94,8 +94,7 @@ def get_knowledge_corpus() -> KnowledgeCorpus:
 
 
 def get_cleanup_executor() -> KnowledgeCleanupExecutor:
-    settings = get_settings()
-    registry = get_retrieval_runtime_registry() if settings.retrieval_runtime_deployments else None
+    registry = get_retrieval_runtime_registry()
     return KnowledgeCleanupExecutor(
         session_factory=SessionFactory,
         storage=get_object_storage(),
@@ -110,5 +109,6 @@ def get_cleanup_executor() -> KnowledgeCleanupExecutor:
                 DataClassification.RESTRICTED,
             )
         },
+        runtime_registry=registry,
         corpus=get_knowledge_corpus(),
     )

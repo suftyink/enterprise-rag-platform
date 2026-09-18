@@ -1,7 +1,12 @@
 import asyncio
 from uuid import UUID, uuid4
 
+from erp_assistant.core.config import get_settings
 from erp_assistant.infrastructure.database import SessionFactory, engine
+from erp_assistant.operations.initialization_worker import (
+    execute_initialization_build,
+    sweep_stale_initialization_runs,
+)
 from erp_assistant.operations.queue_monitor import SqlIndexQueueMonitor
 from erp_assistant.operations.telemetry import OperationalTelemetry, get_telemetry
 from erp_assistant.rag.cleanup_executor import CleanupRetryableError, KnowledgeCleanupExecutor
@@ -126,3 +131,48 @@ async def _run_cleanup(
 )
 def cleanup_knowledge_document(document_id: str) -> dict[str, object]:
     return asyncio.run(_run_cleanup(UUID(document_id)))
+
+
+async def _run_initialization_build(
+    run_id: UUID, *, lease_token: str | None = None
+) -> dict[str, object]:
+    try:
+        outcome = await execute_initialization_build(
+            run_id,
+            SessionFactory,
+            get_settings(),
+            lease_token=lease_token,
+        )
+        return outcome.to_dict()
+    finally:
+        await engine.dispose()
+
+
+@celery_app.task(  # type: ignore[untyped-decorator]
+    bind=True,
+    name="erp_assistant.build_knowledge_initialization",
+    acks_late=True,
+    reject_on_worker_lost=True,
+)
+def build_knowledge_initialization(task: object, run_id: str) -> dict[str, object]:
+    request = getattr(task, "request", None)
+    task_id = getattr(request, "id", None)
+    lease_token = f"task:{task_id}" if task_id else None
+    return asyncio.run(
+        _run_initialization_build(UUID(run_id), lease_token=lease_token)
+    )
+
+
+async def _run_initialization_sweep() -> dict[str, int]:
+    try:
+        count = await sweep_stale_initialization_runs(SessionFactory)
+        return {"expired": count}
+    finally:
+        await engine.dispose()
+
+
+@celery_app.task(  # type: ignore[untyped-decorator]
+    name="erp_assistant.sweep_knowledge_initializations"
+)
+def sweep_knowledge_initializations() -> dict[str, int]:
+    return asyncio.run(_run_initialization_sweep())

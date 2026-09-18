@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from erp_assistant.models.knowledge import KnowledgeDocument, RetrievalProfileRecord
+from erp_assistant.models.operations import KnowledgeInitializationRunRecord
 from erp_assistant.rag.document_indexer import (
     DocumentIndexer,
     DocumentIndexOutcome,
@@ -62,7 +63,7 @@ class ClassifiedDocumentIndexer:
 
 
 class ActiveProfileDocumentIndexer:
-    """Route every incremental write through the database ACTIVE profile."""
+    """Route writes through ACTIVE, or the owned first-run STAGING profile."""
 
     def __init__(
         self,
@@ -83,29 +84,63 @@ class ActiveProfileDocumentIndexer:
                 raise LookupError(f"Knowledge document {document_id} does not exist")
             classification = document.data_classification
             profile = await session.scalar(
-                select(RetrievalProfileRecord).where(
-                    RetrievalProfileRecord.data_classification == classification,
-                    RetrievalProfileRecord.status == "ACTIVE",
+                select(RetrievalProfileRecord)
+                .join(
+                    KnowledgeInitializationRunRecord,
+                    KnowledgeInitializationRunRecord.profile_id
+                    == RetrievalProfileRecord.id,
                 )
+                .where(
+                    RetrievalProfileRecord.data_classification == classification,
+                    RetrievalProfileRecord.status == "STAGING",
+                    KnowledgeInitializationRunRecord.status == "WAITING",
+                    KnowledgeInitializationRunRecord.stage == "WAITING_FOR_CONTENT",
+                )
+                .order_by(
+                    KnowledgeInitializationRunRecord.updated_at.desc(),
+                    KnowledgeInitializationRunRecord.id.desc(),
+                )
+                .limit(1)
             )
+            if profile is None:
+                profile = await session.scalar(
+                    select(RetrievalProfileRecord).where(
+                        RetrievalProfileRecord.data_classification == classification,
+                        RetrievalProfileRecord.status == "ACTIVE",
+                    )
+                )
         if profile is None:
             raise RagDependencyError(
-                "ACTIVE_PROFILE_UNAVAILABLE",
-                "没有可用于增量索引的活动检索 Profile",
+                "INDEX_PROFILE_UNAVAILABLE",
+                "没有可用于文档处理的活动或初始化检索 Profile",
             )
         binding = self._registry.binding_for(profile)
         outcome = await self._indexer_factory(binding).index(document_id, trace_id=trace_id)
         async with self._sessions() as session:
-            active_profile_id = await session.scalar(
-                select(RetrievalProfileRecord.id).where(
-                    RetrievalProfileRecord.data_classification == classification,
-                    RetrievalProfileRecord.status == "ACTIVE",
+            current = await session.get(RetrievalProfileRecord, profile.id)
+            still_owned = bool(
+                current is not None
+                and current.data_classification == classification
+                and (
+                    current.status == "ACTIVE"
+                    or (
+                        current.status == "STAGING"
+                        and await session.scalar(
+                            select(KnowledgeInitializationRunRecord.id).where(
+                                KnowledgeInitializationRunRecord.profile_id == current.id,
+                                KnowledgeInitializationRunRecord.status == "WAITING",
+                                KnowledgeInitializationRunRecord.stage
+                                == "WAITING_FOR_CONTENT",
+                            )
+                        )
+                        is not None
+                    )
                 )
             )
-        if active_profile_id != profile.id:
+        if not still_owned:
             raise DocumentIndexRetryableError(
-                "ACTIVE_PROFILE_CHANGED",
-                "活动检索 Profile 在索引期间发生切换，可安全重试",
+                "INDEX_PROFILE_CHANGED",
+                "检索 Profile 在索引期间发生切换，可安全重试",
                 outcome.attempt,
             )
         return outcome

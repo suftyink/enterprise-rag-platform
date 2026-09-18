@@ -1,10 +1,13 @@
 from copy import deepcopy
+from dataclasses import replace
 from hashlib import sha256
+from uuid import uuid4
 
 import pytest
 
 from erp_assistant.api.knowledge_upload import classify_document
 from erp_assistant.core.config import Settings
+from erp_assistant.models.knowledge import RetrievalProfileRecord
 from erp_assistant.orchestration import provider_factory
 from erp_assistant.orchestration.provider_factory import (
     get_chat_provider_for,
@@ -13,6 +16,7 @@ from erp_assistant.orchestration.provider_factory import (
 from erp_assistant.rag.errors import RagError
 from erp_assistant.rag.runtime_composition import build_retrieval_runtime_registry
 from erp_assistant.rag.types import DataClassification
+from erp_assistant.rag.vector_store import MilvusVectorStore
 
 
 def test_production_classification_uses_trusted_content_hash_not_client_key() -> None:
@@ -187,3 +191,50 @@ def test_runtime_registry_rejects_exact_key_collision_before_allocating_clients(
         build_retrieval_runtime_registry(settings)
 
     assert len(provider_factory._http_clients) == before
+
+
+def test_runtime_registry_exposes_profile_bound_physical_store_for_cleanup() -> None:
+    registry = build_retrieval_runtime_registry(Settings(app_env="development"))
+    base = next(
+        binding
+        for binding in registry.bindings
+        if binding.data_classification is DataClassification.ORDINARY
+    )
+    assert isinstance(base.vector_store, MilvusVectorStore)
+    physical = MilvusVectorStore(
+        uri=base.vector_store.uri,
+        collection=base.vector_store.base_collection,
+        dimension=base.vector_store.dimension,
+        embedding_binding=base.vector_store.embedding_binding,
+        physical_collection="knowledge_v3_ordinary_profile_bound",
+    )
+    rebound = replace(base, vector_store=physical)
+    profile = RetrievalProfileRecord(
+        id=uuid4(),
+        profile_key="ordinary-profile-bound",
+        version=1,
+        data_classification="ORDINARY",
+        provider_boundary=rebound.provider_boundary.value,
+        embedding_deployment=rebound.embedding.deployment,
+        embedding_model=rebound.embedding.model,
+        embedding_dimension=rebound.embedding.dimension,
+        rerank_deployment=rebound.reranker.deployment,
+        rerank_model=rebound.reranker.model,
+        index_identity=physical.identity,
+        physical_index_locator=physical.collection,
+        index_schema_fingerprint="a" * 64,
+        embedding_binding_fingerprint=physical.embedding_binding,
+        parser_version=rebound.parser_version,
+        chunk_version=rebound.chunk_version,
+        retrieval_config=rebound.retrieval_config,
+        configuration_fingerprint=rebound.configuration_fingerprint,
+        production_ready=False,
+        status="RETIRED",
+    )
+
+    stores = registry.vector_stores_for(DataClassification.ORDINARY, (profile,))
+
+    assert physical.identity in {store.identity for store in stores}
+    assert next(store for store in stores if store.identity == physical.identity).collection == (
+        profile.physical_index_locator
+    )

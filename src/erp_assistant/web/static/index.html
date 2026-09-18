@@ -138,6 +138,36 @@
             </div>
           </div>
           <div id="pilot-evidence" class="evidence-card"></div>
+          <section class="release-panel" aria-labelledby="initialization-heading">
+            <div class="view-heading compact-heading">
+              <div>
+                <p class="eyebrow">FIRST RUN</p>
+                <h2 id="initialization-heading">知识库初始化</h2>
+                <p>初始化只准备候选资源；评测、批准、激活和员工开放仍需单独完成。</p>
+              </div>
+              <button id="refresh-initialization" class="text-button" type="button">刷新状态</button>
+            </div>
+            <div id="initialization-status" class="evidence-card" aria-live="polite"></div>
+            <div id="initialization-controls" class="pilot-form">
+              <label for="initialization-classification">数据分类</label>
+              <select id="initialization-classification">
+                <option value="ORDINARY">ORDINARY</option>
+                <option value="RESTRICTED">RESTRICTED</option>
+              </select>
+              <label for="initialization-runtime">运行时配置</label>
+              <select id="initialization-runtime"></select>
+              <label for="initialization-release-version">首个候选版本</label>
+              <input id="initialization-release-version" maxlength="128"
+                placeholder="例如：knowledge-2026-09-23">
+              <div class="button-row">
+                <button id="start-initialization" class="primary-button" type="button">初始化知识库</button>
+                <button id="migrate-initialization" class="secondary-button" type="button" hidden>迁移当前版本</button>
+                <button id="continue-initialization" class="primary-button" type="button" hidden>构建首个候选</button>
+                <button id="retry-initialization" class="secondary-button" type="button" hidden>重试初始化</button>
+                <button id="cancel-initialization" class="danger-button" type="button" hidden>取消初始化</button>
+              </div>
+            </div>
+          </section>
           <section class="release-panel" aria-labelledby="release-heading">
             <div class="view-heading compact-heading">
               <div>
@@ -147,19 +177,6 @@
               </div>
               <button id="refresh-releases" class="text-button" type="button">刷新版本</button>
             </div>
-            <form id="release-form" class="pilot-form">
-              <label for="release-version">候选版本</label>
-              <input id="release-version" name="releaseVersion" maxlength="128"
-                placeholder="例如：knowledge-2026-09-21">
-              <label for="release-profile-id">Profile ID</label>
-              <input id="release-profile-id" name="profileId" required
-                placeholder="STAGING 或首次迁移的 ACTIVE Profile UUID">
-              <div class="button-row">
-                <button class="secondary-button" type="submit" data-release-action="create">创建候选</button>
-                <button class="text-button" type="submit" data-release-action="bootstrap">迁移当前版本</button>
-              </div>
-              <span id="release-form-status" role="status" aria-live="polite"></span>
-            </form>
             <div id="release-list" class="document-list" aria-live="polite"></div>
           </section>
           <form id="pilot-form" class="pilot-form">

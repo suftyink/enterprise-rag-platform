@@ -61,6 +61,7 @@ class MilvusVectorStore:
         dimension: int,
         *,
         embedding_binding: str = "legacy",
+        physical_collection: str | None = None,
     ) -> None:
         self.uri = uri
         self.base_collection = collection
@@ -68,7 +69,7 @@ class MilvusVectorStore:
         self.embedding_binding = embedding_binding
         binding_hash = sha256(embedding_binding.encode("utf-8")).hexdigest()[:12]
         self.collection_prefix = f"{collection}_v3_d"
-        self.collection = f"{self.collection_prefix}{dimension}"
+        self.collection = physical_collection or f"{self.collection_prefix}{dimension}"
         namespace = sha256(uri.encode("utf-8")).hexdigest()[:12]
         self.identity = (
             f"milvus-v3:{namespace}:{self.collection}:dense-{dimension}:bm25:{binding_hash}"

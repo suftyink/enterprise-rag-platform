@@ -13,6 +13,7 @@ from erp_assistant.operations.evidence import validate_production_startup
 from erp_assistant.operations.production_probes import (
     validate_production_runtime_startup,
 )
+from erp_assistant.operations.schema_compatibility import validate_database_schema
 from erp_assistant.operations.telemetry import get_telemetry
 from erp_assistant.orchestration.provider_factory import close_retrieval_provider_clients
 from erp_assistant.web.router import router as web_router
@@ -23,6 +24,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     del application
     settings = get_settings()
     observed_at = datetime.now(UTC)
+    await validate_database_schema()
     validate_production_startup(settings, observed_at=observed_at)
     await validate_production_runtime_startup(settings, observed_at=observed_at)
     try:

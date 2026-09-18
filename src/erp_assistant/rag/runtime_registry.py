@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,6 +13,7 @@ from erp_assistant.orchestration.providers import (
     EmbeddingProvider,
     ProviderBoundary,
     RerankProvider,
+    embedding_binding_fingerprint,
 )
 from erp_assistant.rag.errors import RagDependencyError
 from erp_assistant.rag.retriever import (
@@ -19,7 +22,7 @@ from erp_assistant.rag.retriever import (
     retrieval_configuration_fingerprint,
 )
 from erp_assistant.rag.types import DataClassification
-from erp_assistant.rag.vector_store import VectorStore
+from erp_assistant.rag.vector_store import MilvusVectorStore, VectorStore
 
 
 @dataclass(frozen=True)
@@ -33,6 +36,7 @@ class RetrievalRuntimeBinding:
     settings: Settings
     parser_version: str
     chunk_version: str
+    allow_non_production: bool = False
 
     def __post_init__(self) -> None:
         if not self.parser_version.strip() or not self.chunk_version.strip():
@@ -47,7 +51,7 @@ class RetrievalRuntimeBinding:
             and self.provider_boundary is not ProviderBoundary.INTERNAL
         ):
             raise ValueError("Restricted runtime binding must use the internal boundary")
-        if not self.production_ready:
+        if not self.production_ready and not self.allow_non_production:
             raise ValueError("Production runtime registry cannot contain fake providers")
 
     @property
@@ -104,9 +108,25 @@ class RetrievalRuntimeBinding:
             and profile.chunk_version == self.chunk_version
             and profile.retrieval_config == self.retrieval_config
             and profile.configuration_fingerprint == self.configuration_fingerprint
-            and profile.production_ready
-            and self.production_ready
+            and profile.production_ready == self.production_ready
         )
+
+    def for_profile(self, profile: RetrievalProfileRecord) -> RetrievalRuntimeBinding:
+        locator = profile.physical_index_locator
+        if (
+            locator is None
+            or not isinstance(self.vector_store, MilvusVectorStore)
+            or locator == self.vector_store.collection
+        ):
+            return self
+        store = MilvusVectorStore(
+            uri=self.vector_store.uri,
+            collection=self.vector_store.base_collection,
+            dimension=self.vector_store.dimension,
+            embedding_binding=embedding_binding_fingerprint(self.embedding),
+            physical_collection=locator,
+        )
+        return replace(self, vector_store=store)
 
     def build(
         self,
@@ -136,8 +156,11 @@ class RetrievalRuntimeRegistry:
             self._bindings[binding.registry_key] = binding
 
     def can_resolve(self, profile: RetrievalProfileRecord) -> bool:
-        binding = self._bindings.get(self._profile_key(profile))
-        return binding is not None and binding.matches(profile)
+        try:
+            self.binding_for(profile)
+        except RagDependencyError:
+            return False
+        return True
 
     def resolve(
         self,
@@ -150,18 +173,34 @@ class RetrievalRuntimeRegistry:
 
     def binding_for(self, profile: RetrievalProfileRecord) -> RetrievalRuntimeBinding:
         binding = self._bindings.get(self._profile_key(profile))
-        if binding is None or not binding.matches(profile):
-            raise RagDependencyError(
-                "ACTIVE_PROFILE_BINDING_UNAVAILABLE",
-                "活动 Profile 未注册为可解析的运行时绑定",
-            )
-        return binding
+        if binding is not None and binding.matches(profile):
+            return binding
+        for candidate in self._bindings.values():
+            rebound = candidate.for_profile(profile)
+            if rebound.matches(profile):
+                return rebound
+        raise RagDependencyError(
+            "ACTIVE_PROFILE_BINDING_UNAVAILABLE",
+            "活动 Profile 未注册为可解析的运行时绑定",
+        )
 
-    def vector_stores_for(self, classification: DataClassification) -> tuple[VectorStore, ...]:
+    def vector_stores_for(
+        self,
+        classification: DataClassification,
+        profiles: Iterable[RetrievalProfileRecord] = (),
+    ) -> tuple[VectorStore, ...]:
         stores: dict[str, VectorStore] = {}
         for binding in self._bindings.values():
             if binding.data_classification is classification:
                 stores.setdefault(binding.vector_store.identity, binding.vector_store)
+        for profile in profiles:
+            if profile.data_classification != classification.value:
+                continue
+            try:
+                store = self.binding_for(profile).vector_store
+            except RagDependencyError:
+                continue
+            stores.setdefault(store.identity, store)
         return tuple(stores.values())
 
     @property

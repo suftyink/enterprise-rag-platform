@@ -265,6 +265,9 @@ class RetrievalProfileRecord(Base):
     rerank_deployment: Mapped[str] = mapped_column(String(128), nullable=False)
     rerank_model: Mapped[str] = mapped_column(String(128), nullable=False)
     index_identity: Mapped[str] = mapped_column(String(255), nullable=False)
+    physical_index_locator: Mapped[str | None] = mapped_column(String(255))
+    index_schema_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    embedding_binding_fingerprint: Mapped[str | None] = mapped_column(String(64))
     parser_version: Mapped[str] = mapped_column(String(128), nullable=False)
     chunk_version: Mapped[str] = mapped_column(String(128), nullable=False)
     retrieval_config: Mapped[dict[str, int | float | bool | str]] = mapped_column(

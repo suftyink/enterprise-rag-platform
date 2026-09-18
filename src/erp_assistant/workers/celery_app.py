@@ -16,7 +16,11 @@ celery_app.conf.beat_schedule = {
     "observe-index-queue-every-minute": {
         "task": "erp_assistant.observe_index_queue",
         "schedule": 60.0,
-    }
+    },
+    "sweep-knowledge-initializations-every-minute": {
+        "task": "erp_assistant.sweep_knowledge_initializations",
+        "schedule": 60.0,
+    },
 }
 
 
@@ -38,12 +42,14 @@ def validate_worker_startup(**kwargs: object) -> None:
     from erp_assistant.operations.production_probes import (
         validate_production_runtime_startup,
     )
+    from erp_assistant.operations.schema_compatibility import validate_database_schema
 
     observed_at = datetime.now(UTC)
     validate_production_startup(settings, observed_at=observed_at)
 
     async def validate() -> None:
         try:
+            await validate_database_schema(engine)
             await validate_production_runtime_startup(
                 settings,
                 observed_at=observed_at,

@@ -169,3 +169,64 @@ class CorpusReleaseRepairRequestRecord(Base):
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     trace_id: Mapped[UUID] = mapped_column(Uuid, nullable=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class KnowledgeInitializationRunRecord(Base):
+    __tablename__ = "knowledge_initialization_run"
+    __table_args__ = (
+        UniqueConstraint(
+            "data_classification",
+            "idempotency_key",
+            name="uq_knowledge_initialization_idempotency",
+        ),
+        Index(
+            "uq_knowledge_initialization_nonterminal",
+            "data_classification",
+            unique=True,
+            postgresql_where=text("status IN ('QUEUED', 'RUNNING', 'WAITING')"),
+            sqlite_where=text("status IN ('QUEUED', 'RUNNING', 'WAITING')"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    data_classification: Mapped[str] = mapped_column(String(32), nullable=False)
+    mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    stage: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    runtime_key: Mapped[str | None] = mapped_column(String(128))
+    configuration_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    profile_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("retrieval_profile.id", ondelete="RESTRICT")
+    )
+    candidate_release_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("corpus_release.id", ondelete="RESTRICT")
+    )
+    actor_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    trace_id: Mapped[UUID] = mapped_column(Uuid, nullable=False, index=True)
+    failure_code: Mapped[str | None] = mapped_column(String(128))
+    failure_message: Mapped[str | None] = mapped_column(String(500))
+    retryable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    progress: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    lease_owner: Mapped[str | None] = mapped_column(String(128))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class KnowledgeInitializationAuditRecord(Base):
+    __tablename__ = "knowledge_initialization_audit"
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    run_id: Mapped[UUID] = mapped_column(
+        ForeignKey("knowledge_initialization_run.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    action: Mapped[str] = mapped_column(String(32), nullable=False)
+    actor_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    reason_code: Mapped[str] = mapped_column(String(128), nullable=False)
+    trace_id: Mapped[UUID] = mapped_column(Uuid, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

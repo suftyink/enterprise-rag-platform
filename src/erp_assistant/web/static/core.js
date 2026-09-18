@@ -9,6 +9,8 @@ export const state = {
   pilotAction: "enable",
   releaseAction: "create",
   activeReleaseId: null,
+  initialization: null,
+  initializationKey: null,
 };
 
 export const byId = (id) => document.getElementById(id);
