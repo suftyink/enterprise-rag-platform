@@ -40,6 +40,7 @@ from erp_assistant.models.knowledge import (
 from erp_assistant.models.operations import (
     CorpusReleaseAuditRecord,
     CorpusReleaseDocumentRecord,
+    CorpusReleaseRecord,
     CorpusReleaseRepairRequestRecord,
     PilotAccessRecord,
     PilotReadinessRecord,
@@ -796,6 +797,73 @@ def test_admin_release_workflow_hides_publish_for_published_document(
     page.unroute("**/internal/api/documents", inject_unrecognized_action)
 
 
+def test_admin_release_workflow_offers_only_rollback_for_superseded_history(
+    internal_web_server: WebHarness,
+    browser: Browser,
+) -> None:
+    errors: list[BaseException] = []
+
+    def add_historical_version() -> None:
+        async def update() -> None:
+            async with internal_web_server.sessions() as session:
+                current = await session.get(KnowledgeDocument, RELEASE_DOCUMENT_ID)
+                assert current is not None
+                current.version = 2
+                session.add(
+                    KnowledgeDocument(
+                        id=uuid4(),
+                        scope=current.scope,
+                        scope_id=current.scope_id,
+                        tenant_id=current.tenant_id,
+                        document_key=current.document_key,
+                        version=1,
+                        title="历史发布指南",
+                        original_filename="release-v1.md",
+                        media_type="text/markdown",
+                        data_classification=current.data_classification,
+                        size_bytes=90,
+                        sha256="8" * 64,
+                        object_key="knowledge/release-v1.md",
+                        status=DocumentStatus.READY.value,
+                        active=False,
+                        publication_status=PublicationStatus.SUPERSEDED.value,
+                        retention_status="RETAINED",
+                        governance_revision=current.governance_revision,
+                        index_artifacts_present=True,
+                        created_by="system-admin",
+                        created_at=current.created_at - timedelta(days=1),
+                    )
+                )
+                await session.commit()
+
+        try:
+            asyncio.run(update())
+        except BaseException as exc:
+            errors.append(exc)
+
+    update_thread = threading.Thread(target=add_historical_version)
+    update_thread.start()
+    update_thread.join(timeout=10)
+    assert not update_thread.is_alive()
+    if errors:
+        raise errors[0]
+
+    page = browser.new_page(viewport={"width": 1280, "height": 860})
+    page.goto(f"{internal_web_server.base_url}/internal")
+    page.get_by_text("system-admin · tenant-a").wait_for()
+    page.get_by_role("button", name="知识治理").click()
+    card = page.locator(".document-card", has_text="历史发布指南")
+    card.get_by_role("button", name="回滚").wait_for()
+
+    assert card.get_by_role("button", name="批准入候选").count() == 0
+    assert card.get_by_role("button", name="撤回").count() == 0
+    documents = page.evaluate(
+        "async () => await (await fetch('/internal/api/documents')).json()"
+    )
+    historical = next(item for item in documents if item["title"] == "历史发布指南")
+    assert historical["allowedActions"] == ["ROLLBACK"]
+
+
 def test_admin_release_workflow_refreshes_stale_governance_action(
     internal_web_server: WebHarness,
     browser: Browser,
@@ -885,6 +953,81 @@ def test_admin_release_workflow_emergency_action_requires_membership(
     nonmember = next(item for item in documents if item["documentKey"] == "release-guide-secondary")
     assert "EMERGENCY_WITHDRAW" not in nonmember["allowedActions"]
     assert nonmember["emergencyReleaseId"] is None
+
+
+def test_knowledge_admin_release_workflow_member_hides_emergency_action(
+    internal_web_server: WebHarness,
+    browser: Browser,
+) -> None:
+    errors: list[BaseException] = []
+
+    def add_active_release() -> None:
+        async def update() -> None:
+            async with internal_web_server.sessions() as session:
+                document = await session.get(KnowledgeDocument, RELEASE_DOCUMENT_ID)
+                assert document is not None
+                release_id = uuid4()
+                now = datetime.now(UTC)
+                session.add(
+                    CorpusReleaseRecord(
+                        id=release_id,
+                        release_version="knowledge-admin-role-check",
+                        status="ACTIVE",
+                        data_classification="ORDINARY",
+                        corpus_generation=1,
+                        corpus_hash="7" * 64,
+                        document_count=1,
+                        profile_id=ACTIVE_PROFILE_ID,
+                        index_identity="milvus-v3:current",
+                        index_build_hash="6" * 64,
+                        parser_version="parser-v1",
+                        chunk_version="chunk-v1",
+                        configuration_fingerprint="c" * 64,
+                        route_fingerprints=[],
+                        answer_route_fingerprints=[],
+                        created_by="system-admin",
+                        created_at=now,
+                        updated_at=now,
+                        activated_at=now,
+                    )
+                )
+                session.add(
+                    CorpusReleaseDocumentRecord(
+                        release_id=release_id,
+                        document_id=document.id,
+                        document_sha256=document.sha256,
+                        governance_revision=document.governance_revision,
+                        created_at=now,
+                    )
+                )
+                await session.commit()
+
+        try:
+            asyncio.run(update())
+        except BaseException as exc:
+            errors.append(exc)
+
+    update_thread = threading.Thread(target=add_active_release)
+    update_thread.start()
+    update_thread.join(timeout=10)
+    assert not update_thread.is_alive()
+    if errors:
+        raise errors[0]
+
+    page = browser.new_page(viewport={"width": 1280, "height": 860})
+    page.goto(f"{internal_web_server.base_url}/internal")
+    page.get_by_text("knowledge-admin · tenant-a").wait_for()
+    page.get_by_role("button", name="知识治理").click()
+    card = page.locator(".document-card", has_text="release-guide").first
+    card.get_by_role("button", name="撤回").wait_for()
+
+    assert card.get_by_role("button", name="紧急撤回并暂停").count() == 0
+    documents = page.evaluate(
+        "async () => await (await fetch('/internal/api/documents')).json()"
+    )
+    member = next(item for item in documents if item["documentId"] == str(RELEASE_DOCUMENT_ID))
+    assert member["allowedActions"] == ["WITHDRAW"]
+    assert member["emergencyReleaseId"] is None
 
 
 def test_knowledge_admin_release_workflow_hides_global_publish(

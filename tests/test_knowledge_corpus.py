@@ -4,6 +4,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -13,6 +14,7 @@ from erp_assistant.models.knowledge import (
     KnowledgeChunk,
     KnowledgeDocument,
     KnowledgeIndexJob,
+    KnowledgeLifecycleEvent,
 )
 from erp_assistant.rag.document_indexer import (
     DocumentIndexOutcome,
@@ -376,6 +378,43 @@ async def test_untrusted_actor_is_rejected_at_the_corpus_boundary(
         )
 
     assert raised.value.code == "DOCUMENT_NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_transition_denial_does_not_write_a_lifecycle_failure(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    document = _document(version=1)
+    document.status = DocumentStatus.READY.value
+    document.publication_status = PublicationStatus.REVIEW_PENDING.value
+    document.index_artifacts_present = True
+    async with session_factory() as session:
+        session.add(document)
+        await session.commit()
+    corpus = KnowledgeCorpus(
+        session_factory=session_factory,
+        processor=ControlledProcessor(_outcome(document.id)),
+    )
+
+    with pytest.raises(CorpusError) as raised:
+        await corpus.transition(
+            document.id,
+            LifecycleAction.PUBLISH,
+            CorpusActor(subject_id="employee-a", tenant_id="tenant-a"),
+            reason="unauthorized publish",
+            expected_revision=0,
+        )
+
+    assert raised.value.code == "DOCUMENT_NOT_FOUND"
+    async with session_factory() as session:
+        events = (
+            await session.scalars(
+                select(KnowledgeLifecycleEvent).where(
+                    KnowledgeLifecycleEvent.document_id == document.id
+                )
+            )
+        ).all()
+    assert events == []
 
 
 @pytest.mark.asyncio

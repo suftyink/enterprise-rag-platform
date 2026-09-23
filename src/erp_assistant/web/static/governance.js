@@ -221,14 +221,8 @@ function documentCard(item) {
 
 function confirmLifecycle(item, action) {
   state.pendingLifecycle = { document: item, action };
-  const names = {
-    PUBLISH: "批准入候选",
-    WITHDRAW: "撤回",
-    ROLLBACK: "回滚",
-    EMERGENCY_WITHDRAW: "紧急撤回并暂停活动版本",
-  };
   byId("confirm-copy").textContent = [
-    `确认${names[action]}“${item.title}” v${item.version}？`,
+    `确认${governanceActions[action].label}“${item.title}” v${item.version}？`,
     `作用范围：${item.scope}，当前治理 revision：${item.governanceRevision}。`,
   ].join("");
   byId("confirm-reason").value = "";
@@ -261,14 +255,8 @@ async function completeLifecycleConfirmation() {
             },
       ),
     });
-    const names = {
-      PUBLISH: "批准入候选",
-      WITHDRAW: "撤回",
-      ROLLBACK: "回滚",
-      EMERGENCY_WITHDRAW: "紧急撤回并暂停活动版本",
-    };
     showGlobal(
-      `${names[pending.action]}操作已完成并写入审计。trace ${result.traceId}`,
+      `${governanceActions[pending.action].label}操作已完成并写入审计。trace ${result.traceId}`,
       "success",
     );
     await Promise.all([loadDocuments(), loadReleases(), loadPilotStatus()]);

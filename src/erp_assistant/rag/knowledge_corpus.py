@@ -179,18 +179,15 @@ class KnowledgeCorpus:
     ) -> CorpusDocumentView:
         reason = self._reason(reason)
         operation_trace = trace_id or uuid4()
-        async with self._sessions() as session:
-            document = await session.get(KnowledgeDocument, document_id)
-            if document is None:
-                raise CorpusError("DOCUMENT_NOT_FOUND", "文档不存在")
-            await self._authorizer.require(
+        try:
+            document_version = await self._transition(
+                document_id,
+                action,
                 actor,
-                IdentityAction(action.value),
-                self._resource(document),
+                reason,
+                expected_revision,
                 operation_trace,
             )
-        try:
-            await self._transition(document_id, action, actor, reason, expected_revision)
         except CorpusError as exc:
             self._telemetry.emit(
                 trace_id=operation_trace,
@@ -199,15 +196,16 @@ class KnowledgeCorpus:
                 outcome="FAILED",
                 attributes={"decision": action.value, "reason_code": exc.code},
             )
-            await self._record_failed_transition(
-                document_id,
-                action,
-                actor,
-                reason,
-                exc.code,
-            )
+            if exc.code != "DOCUMENT_NOT_FOUND":
+                await self._record_failed_transition(
+                    document_id,
+                    action,
+                    actor,
+                    reason,
+                    exc.code,
+                )
             raise
-        self._emit_lifecycle(operation_trace, action.value, "SUCCEEDED", document.version)
+        self._emit_lifecycle(operation_trace, action.value, "SUCCEEDED", document_version)
         return await self.inspect(document_id, actor, trace_id=operation_trace)
 
     def _emit_lifecycle(
@@ -236,7 +234,8 @@ class KnowledgeCorpus:
         actor: CorpusActor,
         reason: str,
         expected_revision: int,
-    ) -> None:
+        trace_id: UUID,
+    ) -> int:
         async with self._sessions() as session:
             async with session.begin():
                 document = await session.scalar(
@@ -246,6 +245,12 @@ class KnowledgeCorpus:
                 )
                 if document is None:
                     raise CorpusError("DOCUMENT_NOT_FOUND", "文档不存在")
+                await self._authorizer.require(
+                    actor,
+                    IdentityAction(action.value),
+                    self._resource(document),
+                    trace_id,
+                )
                 head = await self._head(session, document, for_update=True)
                 if head is None:
                     head = KnowledgeCorpusHead(
@@ -279,6 +284,7 @@ class KnowledgeCorpus:
                         result="SUCCEEDED",
                     )
                 )
+                return document.version
 
     async def _record_failed_transition(
         self,
