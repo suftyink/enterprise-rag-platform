@@ -3,7 +3,7 @@ import json
 import socket
 import threading
 import time
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -89,6 +89,23 @@ ACTIVE_PROFILE_ID = UUID("22222222-2222-2222-2222-222222222222")
 CANDIDATE_PROFILE_ID = UUID("33333333-3333-3333-3333-333333333333")
 RELEASE_DOCUMENT_ID = UUID("44444444-4444-4444-4444-444444444444")
 SECOND_RELEASE_DOCUMENT_ID = UUID("77777777-7777-7777-7777-777777777777")
+
+
+def _run_async_update(operation: Callable[[], Awaitable[None]]) -> None:
+    errors: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            asyncio.run(operation())
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    thread.join(timeout=10)
+    assert not thread.is_alive()
+    if errors:
+        raise errors[0]
 
 
 @dataclass
@@ -580,20 +597,7 @@ def test_admin_upload_governance_confirmation_and_pilot_controls(
             job.chunk_count = 4
             await session.commit()
 
-    errors: list[BaseException] = []
-
-    def run_finish_indexing() -> None:
-        try:
-            asyncio.run(finish_indexing())
-        except BaseException as exc:
-            errors.append(exc)
-
-    indexing_thread = threading.Thread(target=run_finish_indexing)
-    indexing_thread.start()
-    indexing_thread.join(timeout=10)
-    assert not indexing_thread.is_alive()
-    if errors:
-        raise errors[0]
+    _run_async_update(finish_indexing)
     page.get_by_role("button", name="刷新列表").click()
     card.get_by_role("button", name="批准入候选").wait_for()
     assert card.get_by_role("button", name="撤回").count() == 0
@@ -801,52 +805,39 @@ def test_admin_release_workflow_offers_only_rollback_for_superseded_history(
     internal_web_server: WebHarness,
     browser: Browser,
 ) -> None:
-    errors: list[BaseException] = []
-
-    def add_historical_version() -> None:
-        async def update() -> None:
-            async with internal_web_server.sessions() as session:
-                current = await session.get(KnowledgeDocument, RELEASE_DOCUMENT_ID)
-                assert current is not None
-                current.version = 2
-                session.add(
-                    KnowledgeDocument(
-                        id=uuid4(),
-                        scope=current.scope,
-                        scope_id=current.scope_id,
-                        tenant_id=current.tenant_id,
-                        document_key=current.document_key,
-                        version=1,
-                        title="历史发布指南",
-                        original_filename="release-v1.md",
-                        media_type="text/markdown",
-                        data_classification=current.data_classification,
-                        size_bytes=90,
-                        sha256="8" * 64,
-                        object_key="knowledge/release-v1.md",
-                        status=DocumentStatus.READY.value,
-                        active=False,
-                        publication_status=PublicationStatus.SUPERSEDED.value,
-                        retention_status="RETAINED",
-                        governance_revision=current.governance_revision,
-                        index_artifacts_present=True,
-                        created_by="system-admin",
-                        created_at=current.created_at - timedelta(days=1),
-                    )
+    async def add_historical_version() -> None:
+        async with internal_web_server.sessions() as session:
+            current = await session.get(KnowledgeDocument, RELEASE_DOCUMENT_ID)
+            assert current is not None
+            current.version = 2
+            session.add(
+                KnowledgeDocument(
+                    id=uuid4(),
+                    scope=current.scope,
+                    scope_id=current.scope_id,
+                    tenant_id=current.tenant_id,
+                    document_key=current.document_key,
+                    version=1,
+                    title="历史发布指南",
+                    original_filename="release-v1.md",
+                    media_type="text/markdown",
+                    data_classification=current.data_classification,
+                    size_bytes=90,
+                    sha256="8" * 64,
+                    object_key="knowledge/release-v1.md",
+                    status=DocumentStatus.READY.value,
+                    active=False,
+                    publication_status=PublicationStatus.SUPERSEDED.value,
+                    retention_status="RETAINED",
+                    governance_revision=current.governance_revision,
+                    index_artifacts_present=True,
+                    created_by="system-admin",
+                    created_at=current.created_at - timedelta(days=1),
                 )
-                await session.commit()
+            )
+            await session.commit()
 
-        try:
-            asyncio.run(update())
-        except BaseException as exc:
-            errors.append(exc)
-
-    update_thread = threading.Thread(target=add_historical_version)
-    update_thread.start()
-    update_thread.join(timeout=10)
-    assert not update_thread.is_alive()
-    if errors:
-        raise errors[0]
+    _run_async_update(add_historical_version)
 
     page = browser.new_page(viewport={"width": 1280, "height": 860})
     page.goto(f"{internal_web_server.base_url}/internal")
@@ -919,30 +910,17 @@ def test_admin_release_workflow_emergency_action_requires_membership(
     first.get_by_role("button", name="紧急撤回并暂停").wait_for()
     assert second.get_by_role("button", name="紧急撤回并暂停").count() == 1
 
-    errors: list[BaseException] = []
-
-    def remove_second_membership() -> None:
-        async def update() -> None:
-            async with internal_web_server.sessions() as session:
-                await session.execute(
-                    delete(CorpusReleaseDocumentRecord).where(
-                        CorpusReleaseDocumentRecord.release_id == UUID(release["releaseId"]),
-                        CorpusReleaseDocumentRecord.document_id == SECOND_RELEASE_DOCUMENT_ID,
-                    )
+    async def remove_second_membership() -> None:
+        async with internal_web_server.sessions() as session:
+            await session.execute(
+                delete(CorpusReleaseDocumentRecord).where(
+                    CorpusReleaseDocumentRecord.release_id == UUID(release["releaseId"]),
+                    CorpusReleaseDocumentRecord.document_id == SECOND_RELEASE_DOCUMENT_ID,
                 )
-                await session.commit()
+            )
+            await session.commit()
 
-        try:
-            asyncio.run(update())
-        except BaseException as exc:
-            errors.append(exc)
-
-    update_thread = threading.Thread(target=remove_second_membership)
-    update_thread.start()
-    update_thread.join(timeout=10)
-    assert not update_thread.is_alive()
-    if errors:
-        raise errors[0]
+    _run_async_update(remove_second_membership)
 
     page.get_by_role("button", name="刷新列表").click()
     first.get_by_role("button", name="紧急撤回并暂停").wait_for()
@@ -959,60 +937,47 @@ def test_knowledge_admin_release_workflow_member_hides_emergency_action(
     internal_web_server: WebHarness,
     browser: Browser,
 ) -> None:
-    errors: list[BaseException] = []
-
-    def add_active_release() -> None:
-        async def update() -> None:
-            async with internal_web_server.sessions() as session:
-                document = await session.get(KnowledgeDocument, RELEASE_DOCUMENT_ID)
-                assert document is not None
-                release_id = uuid4()
-                now = datetime.now(UTC)
-                session.add(
-                    CorpusReleaseRecord(
-                        id=release_id,
-                        release_version="knowledge-admin-role-check",
-                        status="ACTIVE",
-                        data_classification="ORDINARY",
-                        corpus_generation=1,
-                        corpus_hash="7" * 64,
-                        document_count=1,
-                        profile_id=ACTIVE_PROFILE_ID,
-                        index_identity="milvus-v3:current",
-                        index_build_hash="6" * 64,
-                        parser_version="parser-v1",
-                        chunk_version="chunk-v1",
-                        configuration_fingerprint="c" * 64,
-                        route_fingerprints=[],
-                        answer_route_fingerprints=[],
-                        created_by="system-admin",
-                        created_at=now,
-                        updated_at=now,
-                        activated_at=now,
-                    )
+    async def add_active_release() -> None:
+        async with internal_web_server.sessions() as session:
+            document = await session.get(KnowledgeDocument, RELEASE_DOCUMENT_ID)
+            assert document is not None
+            release_id = uuid4()
+            now = datetime.now(UTC)
+            session.add(
+                CorpusReleaseRecord(
+                    id=release_id,
+                    release_version="knowledge-admin-role-check",
+                    status="ACTIVE",
+                    data_classification="ORDINARY",
+                    corpus_generation=1,
+                    corpus_hash="7" * 64,
+                    document_count=1,
+                    profile_id=ACTIVE_PROFILE_ID,
+                    index_identity="milvus-v3:current",
+                    index_build_hash="6" * 64,
+                    parser_version="parser-v1",
+                    chunk_version="chunk-v1",
+                    configuration_fingerprint="c" * 64,
+                    route_fingerprints=[],
+                    answer_route_fingerprints=[],
+                    created_by="system-admin",
+                    created_at=now,
+                    updated_at=now,
+                    activated_at=now,
                 )
-                session.add(
-                    CorpusReleaseDocumentRecord(
-                        release_id=release_id,
-                        document_id=document.id,
-                        document_sha256=document.sha256,
-                        governance_revision=document.governance_revision,
-                        created_at=now,
-                    )
+            )
+            session.add(
+                CorpusReleaseDocumentRecord(
+                    release_id=release_id,
+                    document_id=document.id,
+                    document_sha256=document.sha256,
+                    governance_revision=document.governance_revision,
+                    created_at=now,
                 )
-                await session.commit()
+            )
+            await session.commit()
 
-        try:
-            asyncio.run(update())
-        except BaseException as exc:
-            errors.append(exc)
-
-    update_thread = threading.Thread(target=add_active_release)
-    update_thread.start()
-    update_thread.join(timeout=10)
-    assert not update_thread.is_alive()
-    if errors:
-        raise errors[0]
+    _run_async_update(add_active_release)
 
     page = browser.new_page(viewport={"width": 1280, "height": 860})
     page.goto(f"{internal_web_server.base_url}/internal")
@@ -1034,58 +999,45 @@ def test_knowledge_admin_release_workflow_hides_global_publish(
     internal_web_server: WebHarness,
     browser: Browser,
 ) -> None:
-    errors: list[BaseException] = []
-
-    def prepare_review_documents() -> None:
-        async def update() -> None:
-            async with internal_web_server.sessions() as session:
-                tenant = await session.get(KnowledgeDocument, RELEASE_DOCUMENT_ID)
-                assert tenant is not None
-                tenant.publication_status = PublicationStatus.REVIEW_PENDING.value
-                tenant.active = False
-                head = await session.scalar(
-                    select(KnowledgeCorpusHead).where(
-                        KnowledgeCorpusHead.document_key == "release-guide"
-                    )
+    async def prepare_review_documents() -> None:
+        async with internal_web_server.sessions() as session:
+            tenant = await session.get(KnowledgeDocument, RELEASE_DOCUMENT_ID)
+            assert tenant is not None
+            tenant.publication_status = PublicationStatus.REVIEW_PENDING.value
+            tenant.active = False
+            head = await session.scalar(
+                select(KnowledgeCorpusHead).where(
+                    KnowledgeCorpusHead.document_key == "release-guide"
                 )
-                assert head is not None
-                head.published_document_id = None
-                session.add(
-                    KnowledgeDocument(
-                        id=uuid4(),
-                        scope="GLOBAL",
-                        scope_id="GLOBAL",
-                        tenant_id="tenant-a",
-                        document_key="global-review-guide",
-                        version=1,
-                        title="全局待审核指南",
-                        original_filename="global.md",
-                        media_type="text/markdown",
-                        data_classification="ORDINARY",
-                        size_bytes=10,
-                        sha256="9" * 64,
-                        object_key="knowledge/global.md",
-                        status="READY",
-                        active=False,
-                        publication_status="REVIEW_PENDING",
-                        retention_status="RETAINED",
-                        index_artifacts_present=True,
-                        created_by="knowledge-admin",
-                    )
+            )
+            assert head is not None
+            head.published_document_id = None
+            session.add(
+                KnowledgeDocument(
+                    id=uuid4(),
+                    scope="GLOBAL",
+                    scope_id="GLOBAL",
+                    tenant_id="tenant-a",
+                    document_key="global-review-guide",
+                    version=1,
+                    title="全局待审核指南",
+                    original_filename="global.md",
+                    media_type="text/markdown",
+                    data_classification="ORDINARY",
+                    size_bytes=10,
+                    sha256="9" * 64,
+                    object_key="knowledge/global.md",
+                    status="READY",
+                    active=False,
+                    publication_status="REVIEW_PENDING",
+                    retention_status="RETAINED",
+                    index_artifacts_present=True,
+                    created_by="knowledge-admin",
                 )
-                await session.commit()
+            )
+            await session.commit()
 
-        try:
-            asyncio.run(update())
-        except BaseException as exc:
-            errors.append(exc)
-
-    update_thread = threading.Thread(target=prepare_review_documents)
-    update_thread.start()
-    update_thread.join(timeout=10)
-    assert not update_thread.is_alive()
-    if errors:
-        raise errors[0]
+    _run_async_update(prepare_review_documents)
 
     page = browser.new_page(viewport={"width": 1280, "height": 860})
     page.goto(f"{internal_web_server.base_url}/internal")
