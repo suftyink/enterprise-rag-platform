@@ -11,6 +11,7 @@ from erp_assistant.models.knowledge import (
     KnowledgeDocument,
     KnowledgeVectorArtifact,
 )
+from erp_assistant.rag.knowledge_action_policy import governance_action_decision
 from erp_assistant.rag.knowledge_corpus_contracts import (
     CorpusError,
     LifecycleAction,
@@ -18,7 +19,6 @@ from erp_assistant.rag.knowledge_corpus_contracts import (
 from erp_assistant.rag.types import (
     CleanupKind,
     CleanupStatus,
-    DocumentStatus,
     PublicationStatus,
     RetentionStatus,
 )
@@ -32,62 +32,52 @@ async def apply_transition(
     reason: str,
 ) -> None:
     publication = PublicationStatus(document.publication_status)
-    retention = RetentionStatus(document.retention_status)
-    if action is LifecycleAction.PUBLISH:
-        if (
-            document.status != DocumentStatus.READY.value
-            or publication is not PublicationStatus.REVIEW_PENDING
-            or retention is not RetentionStatus.RETAINED
-            or not document.index_artifacts_present
-        ):
+    if action in {
+        LifecycleAction.PUBLISH,
+        LifecycleAction.REJECT,
+        LifecycleAction.WITHDRAW,
+        LifecycleAction.RESUBMIT,
+        LifecycleAction.ROLLBACK,
+        LifecycleAction.REQUEST_PURGE,
+    }:
+        cleanup_running = await session.scalar(
+            select(KnowledgeCleanupRequest.id)
+            .where(
+                KnowledgeCleanupRequest.document_id == document.id,
+                KnowledgeCleanupRequest.status == CleanupStatus.RUNNING.value,
+            )
+            .limit(1)
+        ) is not None
+        decision = governance_action_decision(
+            document,
+            head.published_document_id,
+            cleanup_running=cleanup_running,
+        )
+        if action not in decision.allowed_actions:
+            if decision.unavailable_reason == "CLEANUP_IN_PROGRESS":
+                raise CorpusError("CLEANUP_IN_PROGRESS", "清理任务执行中，暂不能执行治理操作")
             _invalid(action, publication)
+    if action is LifecycleAction.PUBLISH:
         await _publish(session, head, document)
         return
     if action is LifecycleAction.REJECT:
-        if publication is not PublicationStatus.REVIEW_PENDING:
-            _invalid(action, publication)
         document.publication_status = PublicationStatus.REJECTED.value
         document.active = False
         return
     if action is LifecycleAction.WITHDRAW:
-        if (
-            publication is not PublicationStatus.PUBLISHED
-            or head.published_document_id != document.id
-        ):
-            _invalid(action, publication)
         document.publication_status = PublicationStatus.WITHDRAWN.value
         document.active = False
         head.published_document_id = None
         await _add_cleanup(session, document, CleanupKind.VECTOR, head.revision + 1)
         return
     if action is LifecycleAction.RESUBMIT:
-        if (
-            publication
-            not in {
-                PublicationStatus.REJECTED,
-                PublicationStatus.WITHDRAWN,
-            }
-            or not document.index_artifacts_present
-        ):
-            _invalid(action, publication)
         document.publication_status = PublicationStatus.REVIEW_PENDING.value
         await _cancel_outstanding_cleanup(session, document.id)
         return
     if action is LifecycleAction.ROLLBACK:
-        if (
-            publication not in {PublicationStatus.SUPERSEDED, PublicationStatus.WITHDRAWN}
-            or document.status != DocumentStatus.READY.value
-            or retention is not RetentionStatus.RETAINED
-            or not document.index_artifacts_present
-        ):
-            _invalid(action, publication)
         await _publish(session, head, document)
         return
     if action is LifecycleAction.REQUEST_PURGE:
-        if publication is PublicationStatus.PUBLISHED:
-            _invalid(action, publication)
-        if retention is not RetentionStatus.RETAINED:
-            _invalid(action, publication)
         document.retention_status = RetentionStatus.PURGE_REQUESTED.value
         document.active = False
         await _add_cleanup(

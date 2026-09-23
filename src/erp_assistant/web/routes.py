@@ -21,12 +21,11 @@ from erp_assistant.api.dependencies import (
     get_knowledge_assistant,
     request_trace_id,
 )
-from erp_assistant.api.knowledge_schemas import KnowledgeDocumentResponse
+from erp_assistant.api.knowledge_schemas import InternalKnowledgeDocumentResponse
 from erp_assistant.api.knowledge_upload import (
     KnowledgeUploadCommand,
     accept_document_upload,
 )
-from erp_assistant.api.routes.knowledge import document_response
 from erp_assistant.core.config import Settings, get_settings
 from erp_assistant.identity import (
     ActorContext,
@@ -49,8 +48,8 @@ from erp_assistant.rag.knowledge_assistant import (
 )
 from erp_assistant.rag.knowledge_corpus import KnowledgeCorpus
 from erp_assistant.rag.knowledge_corpus_contracts import CorpusError
-from erp_assistant.rag.knowledge_queries import latest_job
 from erp_assistant.rag.types import KnowledgeScope
+from erp_assistant.web.governance_actions import internal_document_responses
 from erp_assistant.web.pilot import (
     PilotAccessDecision,
     PilotAccessGate,
@@ -179,11 +178,11 @@ async def web_feedback(
     )
 
 
-@router.get("/internal/api/documents", response_model=list[KnowledgeDocumentResponse])
+@router.get("/internal/api/documents", response_model=list[InternalKnowledgeDocumentResponse])
 async def web_documents(
     actor: Annotated[ActorContext, Depends(get_web_actor)],
     session: Annotated[AsyncSession, Depends(get_session)],
-) -> list[KnowledgeDocumentResponse]:
+) -> list[InternalKnowledgeDocumentResponse]:
     _require_admin(actor)
     statement = select(KnowledgeDocument).order_by(KnowledgeDocument.created_at.desc()).limit(100)
     if IdentityRole.SYSTEM_ADMIN not in actor.roles:
@@ -200,12 +199,44 @@ async def web_documents(
             )
         )
     documents = (await session.scalars(statement)).all()
-    return [document_response(item, await latest_job(session, item.id)) for item in documents]
+    return await internal_document_responses(session, actor, documents)
+
+
+@router.get(
+    "/internal/api/documents/{document_id}",
+    response_model=InternalKnowledgeDocumentResponse,
+)
+async def web_document(
+    request: Request,
+    document_id: UUID,
+    actor: Annotated[ActorContext, Depends(get_web_actor)],
+    access: Annotated[IdentityAccess, Depends(get_identity_access)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> InternalKnowledgeDocumentResponse:
+    _require_admin(actor)
+    document = await session.get(KnowledgeDocument, document_id)
+    if document is None:
+        raise _error(404, "DOCUMENT_NOT_FOUND", "文档不存在")
+    try:
+        await access.authorize(
+            actor,
+            IdentityAction.INSPECT,
+            IdentityResource(
+                "knowledge_document",
+                str(document.id),
+                KnowledgeScope(document.scope),
+                document.scope_id,
+            ),
+            trace_id=request_trace_id(request),
+        )
+    except IdentityDenied as exc:
+        raise _error(404, "DOCUMENT_NOT_FOUND", "文档不存在") from exc
+    return (await internal_document_responses(session, actor, [document]))[0]
 
 
 @router.post(
     "/internal/api/documents",
-    response_model=KnowledgeDocumentResponse,
+    response_model=InternalKnowledgeDocumentResponse,
     status_code=status.HTTP_202_ACCEPTED,
 )
 async def web_upload_document(
@@ -223,7 +254,7 @@ async def web_upload_document(
     scope_id: Annotated[str | None, Form(alias="scopeId", max_length=64)] = None,
     document_key: Annotated[str | None, Form(alias="documentKey", max_length=128)] = None,
     title: Annotated[str | None, Form(max_length=255)] = None,
-) -> KnowledgeDocumentResponse:
+) -> InternalKnowledgeDocumentResponse:
     result = await accept_document_upload(
         request=request,
         file=file,
@@ -237,7 +268,9 @@ async def web_upload_document(
     )
     if result.duplicate:
         response.status_code = status.HTTP_200_OK
-    return document_response(result.document, result.job, duplicate=result.duplicate)
+    document = (await internal_document_responses(session, actor, [result.document]))[0]
+    document.duplicate = result.duplicate
+    return document
 
 
 @router.post("/internal/api/documents/{document_id}/lifecycle")
@@ -247,6 +280,7 @@ async def web_lifecycle(
     payload: LifecycleWebRequest,
     actor: Annotated[ActorContext, Depends(get_web_actor)],
     corpus: Annotated[KnowledgeCorpus, Depends(get_web_knowledge_corpus)],
+    session: Annotated[AsyncSession, Depends(get_session)],
     _: Annotated[None, Depends(require_csrf)],
 ) -> dict[str, object]:
     _require_admin(actor)
@@ -262,7 +296,18 @@ async def web_lifecycle(
     except CorpusError as exc:
         status_code = 404 if exc.code == "DOCUMENT_NOT_FOUND" else 409
         raise _error(status_code, exc.code, exc.message) from exc
-    return view.to_dict()
+    document = await session.get(KnowledgeDocument, document_id)
+    if document is None:
+        return view.to_dict()
+    current = (await internal_document_responses(session, actor, [document]))[0]
+    return {
+        **view.to_dict(),
+        "allowedActions": current.allowed_actions,
+        "governanceActionReason": current.governance_action_reason,
+        "emergencyReleaseId": (
+            str(current.emergency_release_id) if current.emergency_release_id else None
+        ),
+    }
 
 
 @router.get("/internal/api/pilot")

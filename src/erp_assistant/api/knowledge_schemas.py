@@ -48,6 +48,14 @@ class KnowledgeDocumentResponse(BaseModel):
     error_detail: str | None = Field(default=None, alias="errorDetail")
 
 
+class InternalKnowledgeDocumentResponse(KnowledgeDocumentResponse):
+    allowed_actions: list[str] = Field(default_factory=list, alias="allowedActions")
+    governance_action_reason: str | None = Field(
+        default=None, alias="governanceActionReason"
+    )
+    emergency_release_id: UUID | None = Field(default=None, alias="emergencyReleaseId")
+
+
 class KnowledgeRetryRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

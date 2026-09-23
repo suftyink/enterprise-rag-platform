@@ -11,6 +11,22 @@ import {
 } from "./core.js";
 
 let documentRefreshTimer = null;
+const governanceActions = Object.freeze({
+  PUBLISH: { label: "批准入候选", className: "secondary-button" },
+  WITHDRAW: { label: "撤回", className: "danger-button" },
+  ROLLBACK: { label: "回滚", className: "danger-button" },
+  EMERGENCY_WITHDRAW: { label: "紧急撤回并暂停", className: "danger-button" },
+});
+const governanceActionMessages = Object.freeze({
+  PROCESSING_INCOMPLETE: "处理完成后可审核",
+  CLEANUP_IN_PROGRESS: "清理任务执行中，暂不可治理",
+  RETENTION_NOT_RETAINED: "文档已进入清理流程",
+  INDEX_ARTIFACTS_MISSING: "索引产物不可用，暂不可治理",
+  NOT_CURRENT_PUBLISHED_DOCUMENT: "该版本不是当前发布版本",
+  GLOBAL_PRIVILEGE_REQUIRED: "全局知识发布需要系统管理员权限",
+  GOVERNANCE_SCOPE_DENIED: "当前账号没有此文档的治理权限",
+  NO_AVAILABLE_GOVERNANCE_ACTION: "当前状态没有可执行的治理操作",
+});
 
 export function bindGovernanceWorkflows() {
   byId("upload-form").addEventListener("submit", uploadDocument);
@@ -178,29 +194,26 @@ function documentCard(item) {
   }
   const actions = document.createElement("div");
   actions.className = "document-actions";
-  ["PUBLISH", "WITHDRAW", "ROLLBACK"].forEach((action) => {
+  const availableActions = Array.isArray(item.allowedActions) ? item.allowedActions : [];
+  availableActions.forEach((action) => {
+    const presentation = governanceActions[action];
+    if (!presentation) {
+      console.warn(`未知的治理动作：${action}`);
+      return;
+    }
+    if (action === "EMERGENCY_WITHDRAW" && !item.emergencyReleaseId) return;
     const button = document.createElement("button");
     button.type = "button";
-    button.className = action === "PUBLISH" ? "secondary-button" : "danger-button";
-    button.textContent = {
-      PUBLISH: "批准入候选",
-      WITHDRAW: "撤回",
-      ROLLBACK: "回滚",
-    }[action];
+    button.className = presentation.className;
+    button.textContent = presentation.label;
     button.addEventListener("click", () => confirmLifecycle(item, action));
     actions.append(button);
   });
-  if (
-    state.activeReleaseId &&
-    state.session?.roles.includes("SYSTEM_ADMIN") &&
-    item.publicationStatus !== "WITHDRAWN"
-  ) {
-    const emergency = document.createElement("button");
-    emergency.type = "button";
-    emergency.className = "danger-button";
-    emergency.textContent = "紧急撤回并暂停";
-    emergency.addEventListener("click", () => confirmLifecycle(item, "EMERGENCY_WITHDRAW"));
-    actions.append(emergency);
+  if (!actions.childElementCount) {
+    actions.append(statusParagraph(
+      governanceActionMessages[item.governanceActionReason]
+        || "当前状态没有可执行的治理操作",
+    ));
   }
   article.append(actions);
   return article;
@@ -234,7 +247,7 @@ async function completeLifecycleConfirmation() {
   try {
     const emergency = pending.action === "EMERGENCY_WITHDRAW";
     const path = emergency
-      ? `/internal/api/releases/${state.activeReleaseId}/documents/${pending.document.documentId}/emergency-withdraw`
+      ? `/internal/api/releases/${pending.document.emergencyReleaseId}/documents/${pending.document.documentId}/emergency-withdraw`
       : `/internal/api/documents/${pending.document.documentId}/lifecycle`;
     const result = await api(path, {
       method: "POST",
@@ -260,7 +273,18 @@ async function completeLifecycleConfirmation() {
     );
     await Promise.all([loadDocuments(), loadReleases(), loadPilotStatus()]);
   } catch (error) {
-    showGlobal(`治理操作失败：${error.message}`, "error");
+    if (
+      error.status === 409 &&
+      ["INVALID_CORPUS_TRANSITION", "STALE_CORPUS_REVISION"].includes(error.code)
+    ) {
+      await loadDocuments();
+      showGlobal(
+        `文档状态已变化，请按最新可用操作重试。${error.traceId ? `trace ${error.traceId}` : ""}`,
+        "warning",
+      );
+    } else {
+      showGlobal(`治理操作失败：${error.message}`, "error");
+    }
   }
 }
 

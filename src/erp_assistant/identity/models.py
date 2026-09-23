@@ -75,6 +75,16 @@ class ActorContext:
             return scope_id == self.tenant_id
         return KnowledgeScopeRef(scope, scope_id) in self.knowledge_scopes
 
+    def can_govern(self, scope: KnowledgeScope, scope_id: str) -> bool:
+        if not self.is_trusted:
+            return False
+        if IdentityRole.SYSTEM_ADMIN in self.roles:
+            return True
+        return (
+            IdentityRole.KNOWLEDGE_ADMIN in self.roles
+            and KnowledgeScopeRef(scope, scope_id) in self.knowledge_scopes
+        )
+
     @classmethod
     def _from_membership(
         cls,

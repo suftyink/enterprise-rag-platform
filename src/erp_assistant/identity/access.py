@@ -215,11 +215,11 @@ class IdentityAccess:
                 else "SYSTEM_ADMIN_REQUIRED"
             )
         if action in _GOVERNANCE_ACTIONS:
-            if IdentityRole.SYSTEM_ADMIN in actor.roles:
-                return None
-            scope_allowed = resource_scope(resource) in actor.knowledge_scopes
-            role_allowed = IdentityRole.KNOWLEDGE_ADMIN in actor.roles
-            return None if scope_allowed and role_allowed else "GOVERNANCE_SCOPE_DENIED"
+            return (
+                None
+                if actor.can_govern(resource.scope, resource.scope_id)
+                else "GOVERNANCE_SCOPE_DENIED"
+            )
         return "ACTION_DENIED"
 
     async def _record(

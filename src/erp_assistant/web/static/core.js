@@ -35,6 +35,7 @@ export async function api(url, options = {}, includeCsrf = true, jsonContent = t
     const error = new Error(message);
     error.status = response.status;
     error.code = code;
+    error.traceId = response.headers.get("X-Trace-ID");
     throw error;
   }
   if (response.status === 204) return null;

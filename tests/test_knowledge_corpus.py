@@ -129,6 +129,16 @@ async def test_publish_switches_versions_atomically_and_withdraws_immediately(
     assert published_first.retrieval_eligible is True
     assert published_first.revision == 1
 
+    with pytest.raises(CorpusError) as repeated_publish:
+        await first_corpus.transition(
+            first.id,
+            LifecycleAction.PUBLISH,
+            _actor(),
+            reason="accidental duplicate approval",
+            expected_revision=1,
+        )
+    assert repeated_publish.value.code == "INVALID_CORPUS_TRANSITION"
+
     second_corpus = KnowledgeCorpus(
         session_factory=session_factory,
         processor=ControlledProcessor(_outcome(second.id)),

@@ -12,27 +12,40 @@ from uuid import UUID, uuid4
 import pytest
 import uvicorn
 from playwright.sync_api import Browser, Page, Route, sync_playwright
-from sqlalchemy import select, text
+from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from erp_assistant.api.dependencies import get_identity_access, get_knowledge_assistant
 from erp_assistant.core.config import Settings, get_settings
-from erp_assistant.identity import IdentityAccess, IdentityMembership, IdentityRole
+from erp_assistant.identity import (
+    ActorContext,
+    IdentityAccess,
+    IdentityMembership,
+    IdentityRole,
+    KnowledgeScopeRef,
+)
 from erp_assistant.identity.composition import DeterministicIdentityVerifier
 from erp_assistant.identity.directory import StaticIdentityDirectory
 from erp_assistant.identity.models import SecurityAuditEvent
 from erp_assistant.infrastructure.database import Base, get_session
 from erp_assistant.infrastructure.object_storage import get_object_storage
 from erp_assistant.main import app
-from erp_assistant.models.knowledge import KnowledgeDocument, RetrievalProfileRecord
+from erp_assistant.models.knowledge import (
+    KnowledgeCorpusHead,
+    KnowledgeDocument,
+    KnowledgeIndexJob,
+    RetrievalProfileRecord,
+)
 from erp_assistant.models.operations import (
     CorpusReleaseAuditRecord,
+    CorpusReleaseDocumentRecord,
     CorpusReleaseRepairRequestRecord,
     PilotAccessRecord,
     PilotReadinessRecord,
 )
 from erp_assistant.operations.readiness_models import ReleaseIdentity
+from erp_assistant.rag.document_indexer import DocumentIndexOutcome
 from erp_assistant.rag.errors import RagDependencyError, RagError
 from erp_assistant.rag.index_manifest import build_manifest, capture_corpus_snapshot
 from erp_assistant.rag.index_provisioning import InMemoryIndexProvisioner
@@ -45,16 +58,17 @@ from erp_assistant.rag.knowledge_assistant import (
     FeedbackReceipt,
     FeedbackRequest,
 )
+from erp_assistant.rag.knowledge_corpus import KnowledgeCorpus
 from erp_assistant.rag.knowledge_corpus_contracts import (
-    CorpusChunkSummary,
     CorpusDocumentView,
+    IdentityCorpusAuthorizer,
     LifecycleAction,
 )
 from erp_assistant.rag.types import (
     DataClassification,
     DocumentStatus,
+    KnowledgeScope,
     PublicationStatus,
-    RetentionStatus,
 )
 from erp_assistant.web.initialization_routes import get_initialization_index_provisioner
 from erp_assistant.web.pilot import PilotAccessDecision, PilotAccessGate
@@ -184,60 +198,53 @@ class FakeStorage:
 
 @dataclass
 class FakeCorpus:
+    sessions: async_sessionmaker[AsyncSession]
+    access: IdentityAccess
     transitions: list[tuple[UUID, LifecycleAction, str]] = field(default_factory=list)
+
+    def _real(self) -> KnowledgeCorpus:
+        return KnowledgeCorpus(
+            session_factory=self.sessions,
+            processor=UnusedCorpusProcessor(),
+            authorizer=IdentityCorpusAuthorizer(self.access),
+        )
 
     async def inspect(
         self,
         document_id: UUID,
-        actor: object,
+        actor: ActorContext,
         *,
         trace_id: UUID,
     ) -> CorpusDocumentView:
-        del actor, trace_id
-        return self._view(document_id, PublicationStatus.PUBLISHED)
+        return await self._real().inspect(document_id, actor, trace_id=trace_id)
 
     async def transition(
         self,
         document_id: UUID,
         action: LifecycleAction,
-        actor: object,
+        actor: ActorContext,
         *,
         reason: str,
         expected_revision: int,
         trace_id: UUID,
     ) -> CorpusDocumentView:
-        del actor, expected_revision, trace_id
-        self.transitions.append((document_id, action, reason))
-        return self._view(document_id, PublicationStatus.PUBLISHED)
-
-    @staticmethod
-    def _view(
-        document_id: UUID,
-        publication_status: PublicationStatus,
-    ) -> CorpusDocumentView:
-        return CorpusDocumentView(
-            document_id=document_id,
-            document_key="pilot-guide",
-            version=1,
-            title="试点操作指南",
-            original_filename="pilot.md",
-            media_type="text/markdown",
-            size_bytes=100,
-            sha256="b" * 64,
-            processing_status=DocumentStatus.READY,
-            publication_status=publication_status,
-            retention_status=RetentionStatus.RETAINED,
-            revision=1,
-            retrieval_eligible=True,
-            warnings=(),
-            pipeline_revision="pipeline-v1",
-            parser_version="markdown-v1",
-            chunking_version="chunk-v1",
-            quality_signals={},
-            chunk_summary=CorpusChunkSummary(1, 100, None, None),
-            audit_events=(),
-            cleanup_requests=(),
+        view = await self._real().transition(
+            document_id,
+            action,
+            actor,
+            reason=reason,
+            expected_revision=expected_revision,
+            trace_id=trace_id,
         )
+        self.transitions.append((document_id, action, reason))
+        return view
+
+
+class UnusedCorpusProcessor:
+    async def index(
+        self, document_id: UUID, *, trace_id: UUID | None = None
+    ) -> DocumentIndexOutcome:
+        raise AssertionError(f"unexpected indexing: {document_id} {trace_id}")
 
 
 @dataclass
@@ -304,18 +311,32 @@ def internal_web_server(request: pytest.FixtureRequest) -> Iterator[WebHarness]:
         return factory
 
     sessions = asyncio.run(prepare())
+    is_knowledge_admin = "knowledge_admin_" in request.node.name
     is_admin_scenario = "admin_" in request.node.name
-    subject_id = "system-admin" if is_admin_scenario else "employee-user"
+    subject_id = (
+        "knowledge-admin" if is_knowledge_admin
+        else "system-admin" if is_admin_scenario
+        else "employee-user"
+    )
     membership = IdentityMembership(
         tenant_id="tenant-a",
         roles=frozenset(
             {
-                IdentityRole.SYSTEM_ADMIN
-                if is_admin_scenario
+                IdentityRole.KNOWLEDGE_ADMIN if is_knowledge_admin
+                else IdentityRole.SYSTEM_ADMIN if is_admin_scenario
                 else IdentityRole.INTERNAL_EMPLOYEE
             }
         ),
-        knowledge_scopes=frozenset(),
+        knowledge_scopes=(
+            frozenset(
+                {
+                    KnowledgeScopeRef(KnowledgeScope.TENANT, "tenant-a"),
+                    KnowledgeScopeRef(KnowledgeScope.GLOBAL, "GLOBAL"),
+                }
+            )
+            if is_knowledge_admin
+            else frozenset()
+        ),
     )
     access = IdentityAccess(
         verifier=DeterministicIdentityVerifier(),
@@ -329,7 +350,7 @@ def internal_web_server(request: pytest.FixtureRequest) -> Iterator[WebHarness]:
     )
     store = MemorySessionStore()
     assistant = FakeAssistant()
-    corpus = FakeCorpus()
+    corpus = FakeCorpus(sessions, access)
     storage = FakeStorage()
 
     async def override_session() -> AsyncIterator[AsyncSession]:
@@ -508,6 +529,10 @@ def test_admin_upload_governance_confirmation_and_pilot_controls(
     assert card.get_by_text("任务结果").is_visible()
     assert card.get_by_text("QUEUED", exact=True).first.is_visible()
     assert card.get_by_text("分块数量").is_visible()
+    assert card.get_by_text("处理完成后可审核").is_visible()
+    assert card.get_by_role("button", name="批准入候选").count() == 0
+    assert card.get_by_role("button", name="撤回").count() == 0
+    assert card.get_by_role("button", name="回滚").count() == 0
     assert internal_web_server.storage.objects
 
     progress_requests = 0
@@ -536,6 +561,43 @@ def test_admin_upload_governance_confirmation_and_pilot_controls(
     assert progress_requests >= 2
     page.unroute("**/internal/api/documents", advance_document_progress)
 
+    async def finish_indexing() -> None:
+        async with internal_web_server.sessions() as session:
+            document = await session.scalar(
+                select(KnowledgeDocument).where(KnowledgeDocument.document_key == "pilot-guide")
+            )
+            assert document is not None
+            document.status = DocumentStatus.READY.value
+            document.publication_status = PublicationStatus.REVIEW_PENDING.value
+            document.index_artifacts_present = True
+            job = await session.scalar(
+                select(KnowledgeIndexJob).where(KnowledgeIndexJob.document_id == document.id)
+            )
+            assert job is not None
+            job.status = "SUCCEEDED"
+            job.phase = "READY"
+            job.chunk_count = 4
+            await session.commit()
+
+    errors: list[BaseException] = []
+
+    def run_finish_indexing() -> None:
+        try:
+            asyncio.run(finish_indexing())
+        except BaseException as exc:
+            errors.append(exc)
+
+    indexing_thread = threading.Thread(target=run_finish_indexing)
+    indexing_thread.start()
+    indexing_thread.join(timeout=10)
+    assert not indexing_thread.is_alive()
+    if errors:
+        raise errors[0]
+    page.get_by_role("button", name="刷新列表").click()
+    card.get_by_role("button", name="批准入候选").wait_for()
+    assert card.get_by_role("button", name="撤回").count() == 0
+    assert card.get_by_role("button", name="回滚").count() == 0
+
     for label, action in (
         ("批准入候选", LifecycleAction.PUBLISH),
         ("撤回", LifecycleAction.WITHDRAW),
@@ -547,6 +609,10 @@ def test_admin_upload_governance_confirmation_and_pilot_controls(
         page.get_by_role("button", name="确认执行").click()
         page.get_by_text(f"{label}操作已完成并写入审计").wait_for()
         assert internal_web_server.corpus.transitions[-1][1] is action
+        if action is LifecycleAction.PUBLISH:
+            assert card.get_by_role("button", name="批准入候选").count() == 0
+        if action is LifecycleAction.WITHDRAW:
+            assert card.get_by_role("button", name="撤回").count() == 0
 
     page.get_by_role("button", name="试点门禁").click()
     page.get_by_label("试点范围").fill("华东运营组 30 人")
@@ -693,6 +759,208 @@ def test_employee_cannot_access_knowledge_initialization(
 
     assert response["status"] == 403
     assert response["body"]["detail"]["code"] == "RESOURCE_NOT_FOUND"
+
+
+def test_admin_release_workflow_hides_publish_for_published_document(
+    internal_web_server: WebHarness,
+    browser: Browser,
+) -> None:
+    page = browser.new_page(viewport={"width": 1280, "height": 860})
+    page.goto(f"{internal_web_server.base_url}/internal")
+    page.get_by_text("system-admin · tenant-a").wait_for()
+    page.get_by_role("button", name="知识治理").click()
+    card = page.locator(".document-card").first
+    card.get_by_text("APPROVED_FOR_CANDIDATE").wait_for()
+
+    assert card.get_by_role("button", name="批准入候选").count() == 0
+    listed = page.evaluate(
+        "async () => await (await fetch('/internal/api/documents')).json()"
+    )
+    document_id = listed[0]["documentId"]
+    single = page.evaluate(
+        "async id => await (await fetch(`/internal/api/documents/${id}`)).json()",
+        document_id,
+    )
+    assert listed[0]["allowedActions"] == single["allowedActions"]
+    assert "PUBLISH" not in single["allowedActions"]
+
+    def inject_unrecognized_action(route: Route) -> None:
+        upstream = route.fetch()
+        documents = upstream.json()
+        documents[0]["allowedActions"].append("UNRECOGNIZED_ACTION")
+        route.fulfill(response=upstream, body=json.dumps(documents))
+
+    page.route("**/internal/api/documents", inject_unrecognized_action)
+    page.get_by_role("button", name="刷新列表").click()
+    assert card.get_by_role("button", name="UNRECOGNIZED_ACTION").count() == 0
+    page.unroute("**/internal/api/documents", inject_unrecognized_action)
+
+
+def test_admin_release_workflow_refreshes_stale_governance_action(
+    internal_web_server: WebHarness,
+    browser: Browser,
+) -> None:
+    stale_page = browser.new_page(viewport={"width": 1280, "height": 860})
+    stale_page.goto(f"{internal_web_server.base_url}/internal")
+    stale_page.get_by_text("system-admin · tenant-a").wait_for()
+    stale_page.get_by_role("button", name="知识治理").click()
+    card = stale_page.locator(".document-card").first
+    card.get_by_role("button", name="撤回").click()
+    stale_page.get_by_label("操作原因").fill("发现版本过期")
+
+    other_page = browser.new_page(viewport={"width": 1280, "height": 860})
+    other_page.goto(f"{internal_web_server.base_url}/internal")
+    other_page.get_by_text("system-admin · tenant-a").wait_for()
+    csrf = other_page.evaluate(
+        "async () => (await (await fetch('/internal/api/session')).json()).csrfToken"
+    )
+    document_id = other_page.evaluate(
+        "async () => (await (await fetch('/internal/api/documents')).json())[0].documentId"
+    )
+    _browser_api(
+        other_page,
+        csrf,
+        f"/internal/api/documents/{document_id}/lifecycle",
+        {"action": "WITHDRAW", "reason": "另一管理员先撤回", "expectedRevision": 1},
+    )
+
+    stale_page.get_by_role("button", name="确认执行").click()
+    stale_page.get_by_text("文档状态已变化，请按最新可用操作重试").wait_for()
+    assert "trace " in stale_page.locator("#global-status").inner_text()
+    assert card.get_by_role("button", name="撤回").count() == 0
+    assert card.get_by_role("button", name="回滚").count() == 1
+
+
+def test_admin_release_workflow_emergency_action_requires_membership(
+    internal_web_server: WebHarness,
+    browser: Browser,
+) -> None:
+    page = browser.new_page(viewport={"width": 1280, "height": 860})
+    page.goto(f"{internal_web_server.base_url}/internal")
+    page.get_by_text("system-admin · tenant-a").wait_for()
+    csrf = page.evaluate(
+        "async () => (await (await fetch('/internal/api/session')).json()).csrfToken"
+    )
+    release = _browser_api(
+        page, csrf, "/internal/api/releases/bootstrap", {"profileId": str(ACTIVE_PROFILE_ID)}
+    )
+    page.get_by_role("button", name="知识治理").click()
+    page.get_by_role("button", name="刷新列表").click()
+    first = page.locator(".document-card", has_text="release-guide").first
+    second = page.locator(".document-card", has_text="release-guide-secondary")
+    first.get_by_role("button", name="紧急撤回并暂停").wait_for()
+    assert second.get_by_role("button", name="紧急撤回并暂停").count() == 1
+
+    errors: list[BaseException] = []
+
+    def remove_second_membership() -> None:
+        async def update() -> None:
+            async with internal_web_server.sessions() as session:
+                await session.execute(
+                    delete(CorpusReleaseDocumentRecord).where(
+                        CorpusReleaseDocumentRecord.release_id == UUID(release["releaseId"]),
+                        CorpusReleaseDocumentRecord.document_id == SECOND_RELEASE_DOCUMENT_ID,
+                    )
+                )
+                await session.commit()
+
+        try:
+            asyncio.run(update())
+        except BaseException as exc:
+            errors.append(exc)
+
+    update_thread = threading.Thread(target=remove_second_membership)
+    update_thread.start()
+    update_thread.join(timeout=10)
+    assert not update_thread.is_alive()
+    if errors:
+        raise errors[0]
+
+    page.get_by_role("button", name="刷新列表").click()
+    first.get_by_role("button", name="紧急撤回并暂停").wait_for()
+    assert second.get_by_role("button", name="紧急撤回并暂停").count() == 0
+    documents = page.evaluate(
+        "async () => await (await fetch('/internal/api/documents')).json()"
+    )
+    nonmember = next(item for item in documents if item["documentKey"] == "release-guide-secondary")
+    assert "EMERGENCY_WITHDRAW" not in nonmember["allowedActions"]
+    assert nonmember["emergencyReleaseId"] is None
+
+
+def test_knowledge_admin_release_workflow_hides_global_publish(
+    internal_web_server: WebHarness,
+    browser: Browser,
+) -> None:
+    errors: list[BaseException] = []
+
+    def prepare_review_documents() -> None:
+        async def update() -> None:
+            async with internal_web_server.sessions() as session:
+                tenant = await session.get(KnowledgeDocument, RELEASE_DOCUMENT_ID)
+                assert tenant is not None
+                tenant.publication_status = PublicationStatus.REVIEW_PENDING.value
+                tenant.active = False
+                head = await session.scalar(
+                    select(KnowledgeCorpusHead).where(
+                        KnowledgeCorpusHead.document_key == "release-guide"
+                    )
+                )
+                assert head is not None
+                head.published_document_id = None
+                session.add(
+                    KnowledgeDocument(
+                        id=uuid4(),
+                        scope="GLOBAL",
+                        scope_id="GLOBAL",
+                        tenant_id="tenant-a",
+                        document_key="global-review-guide",
+                        version=1,
+                        title="全局待审核指南",
+                        original_filename="global.md",
+                        media_type="text/markdown",
+                        data_classification="ORDINARY",
+                        size_bytes=10,
+                        sha256="9" * 64,
+                        object_key="knowledge/global.md",
+                        status="READY",
+                        active=False,
+                        publication_status="REVIEW_PENDING",
+                        retention_status="RETAINED",
+                        index_artifacts_present=True,
+                        created_by="knowledge-admin",
+                    )
+                )
+                await session.commit()
+
+        try:
+            asyncio.run(update())
+        except BaseException as exc:
+            errors.append(exc)
+
+    update_thread = threading.Thread(target=prepare_review_documents)
+    update_thread.start()
+    update_thread.join(timeout=10)
+    assert not update_thread.is_alive()
+    if errors:
+        raise errors[0]
+
+    page = browser.new_page(viewport={"width": 1280, "height": 860})
+    page.goto(f"{internal_web_server.base_url}/internal")
+    page.get_by_text("knowledge-admin · tenant-a").wait_for()
+    page.get_by_role("button", name="知识治理").click()
+    tenant_card = page.locator(".document-card", has_text="release-guide").first
+    global_card = page.locator(".document-card", has_text="global-review-guide")
+    tenant_card.get_by_role("button", name="批准入候选").wait_for()
+    assert global_card.get_by_role("button", name="批准入候选").count() == 0
+    documents = page.evaluate(
+        "async () => await (await fetch('/internal/api/documents')).json()"
+    )
+    assert "PUBLISH" in next(
+        item for item in documents if item["documentKey"] == "release-guide"
+    )["allowedActions"]
+    assert "PUBLISH" not in next(
+        item for item in documents if item["documentKey"] == "global-review-guide"
+    )["allowedActions"]
 
 
 def test_admin_release_workflow_activates_canaries_rolls_back_and_withdraws(
@@ -1223,6 +1491,20 @@ async def _prepare_release_workflow(
                     governance_revision=1,
                     index_artifacts_present=True,
                     created_by="system-admin",
+                ),
+                KnowledgeCorpusHead(
+                    scope="TENANT",
+                    scope_id="tenant-a",
+                    document_key="release-guide",
+                    revision=1,
+                    published_document_id=RELEASE_DOCUMENT_ID,
+                ),
+                KnowledgeCorpusHead(
+                    scope="TENANT",
+                    scope_id="tenant-a",
+                    document_key="release-guide-secondary",
+                    revision=1,
+                    published_document_id=SECOND_RELEASE_DOCUMENT_ID,
                 ),
             ]
         )

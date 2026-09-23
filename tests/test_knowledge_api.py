@@ -177,6 +177,7 @@ async def test_upload_status_and_hash_deduplication(
     assert status_response.json()["publicationStatus"] == "UNPUBLISHED"
     assert status_response.json()["retentionStatus"] == "RETAINED"
     assert status_response.json()["governanceRevision"] == 0
+    assert "allowedActions" not in status_response.json()
     assert status_response.json()["retrievalEligible"] is False
     assert status_response.json()["jobStatus"] == "QUEUED"
     assert status_response.json()["attempt"] == 0
