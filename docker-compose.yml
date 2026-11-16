@@ -1,4 +1,4 @@
-name: crossborder-erp-ai-assistant
+name: enterprise-rag-platform
 
 services:
   postgres:
@@ -93,8 +93,13 @@ services:
 
 volumes:
   postgres_data:
+    name: crossborder-erp-ai-assistant_postgres_data
   redis_data:
+    name: crossborder-erp-ai-assistant_redis_data
   etcd_data:
+    name: crossborder-erp-ai-assistant_etcd_data
   minio_data:
+    name: crossborder-erp-ai-assistant_minio_data
   milvus_data:
+    name: crossborder-erp-ai-assistant_milvus_data
 

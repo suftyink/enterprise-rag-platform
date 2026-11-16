@@ -297,7 +297,7 @@ wheels = [
 ]
 
 [[package]]
-name = "crossborder-erp-ai-assistant"
+name = "enterprise-rag-platform"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

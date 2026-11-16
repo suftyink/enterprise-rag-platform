@@ -1,10 +1,21 @@
+# Local configuration and secrets
 .env
+.env.*
+!.env.example
+
+# Editors and operating systems
 .idea/
 .vscode/
+.DS_Store
+Thumbs.db
+
+# Python environments, caches, and build output
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 .coverage
+.coverage.*
+coverage.xml
 htmlcov/
 __pycache__/
 *.py[cod]
@@ -12,4 +23,20 @@ __pycache__/
 dist/
 build/
 .venv/
+
+# Runtime state and local infrastructure data
 volumes/
+.tmp/
+tmp/
+*.log
+*.pid
+celerybeat-schedule
+celerybeat-schedule.*
+*.sqlite
+*.sqlite3
+
+# Generated evaluation and test artifacts
+playwright-report/
+test-results/
+retrieval-evaluation-report.json
+pilot-readiness-report.json

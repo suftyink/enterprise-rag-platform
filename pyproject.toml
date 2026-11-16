@@ -1,7 +1,7 @@
 [project]
-name = "crossborder-erp-ai-assistant"
+name = "enterprise-rag-platform"
 version = "0.1.0"
-description = "Cross-border ERP intelligent business assistant"
+description = "Enterprise RAG knowledge platform with governed ingestion, retrieval, evaluation, and release workflows"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "alembic>=1.16,<2",

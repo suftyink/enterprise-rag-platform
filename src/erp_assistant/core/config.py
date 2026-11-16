@@ -49,7 +49,7 @@ class RetrievalRuntimeDeploymentSettings(BaseModel):
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    app_name: str = "Cross-border ERP AI Assistant"
+    app_name: str = "Enterprise RAG Knowledge Platform"
     app_env: str = "development"
     api_prefix: str = "/api/assistant/v1"
     database_url: str = (

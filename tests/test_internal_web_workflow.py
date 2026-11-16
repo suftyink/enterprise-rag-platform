@@ -444,6 +444,8 @@ def test_employee_answer_refusal_failure_feedback_and_safe_citations(
     page.goto(f"{internal_web_server.base_url}/internal")
     page.wait_for_url("**/internal")
     page.get_by_text("employee-user · tenant-a").wait_for()
+    assert page.title() == "企业 RAG 知识平台 · 内部试点"
+    assert page.locator(".brand-name").inner_text() == "企业 RAG 知识平台"
     assert page.get_by_role("button", name="知识治理").is_hidden()
     forged_status = page.evaluate(
         """async () => (await fetch('/internal/api/documents', {
