@@ -2,7 +2,7 @@
 
 `enterprise-rag-platform` 是面向内部员工的受治理 RAG 平台，覆盖文档入库、解析切分、混合检索、引用回答、权限控制、质量评测、语料发布和生产试点门禁。
 
-项目不包含跨境业务、ERP 交易处理或业务系统写操作。回答只能基于当前发布且有权限访问的知识；证据不足时明确拒答。
+平台专注企业知识的受控检索与回答。回答只能基于当前发布且有权限访问的知识；证据不足时明确拒答。
 
 ## 核心能力
 
@@ -69,8 +69,6 @@ migrations/          # Alembic 数据库迁移
 tests/               # 单元、集成和浏览器测试
 .scratch/            # 本地规格与 ticket（项目过程资料）
 ```
-
-> `erp_assistant` 是第一阶段保留的兼容性 Python 包名，不代表当前产品领域。数据库名、Redis key、对象桶、Docker 数据卷和 OIDC 标识同样暂时保留，后续应通过独立迁移再统一为 `rag_platform`。
 
 ## 环境要求
 
@@ -148,7 +146,7 @@ IDENTITY_MEMBERSHIPS_JSON={"employee-a":{"tenantId":"tenant-a","roles":["INTERNA
 
 如需上传和治理文档，将角色改为 `KNOWLEDGE_ADMIN`；发布全局知识、管理 Release 和开放试点需要 `SYSTEM_ADMIN`。
 
-生产环境必须使用 OIDC Authorization Code + PKCE，并配置 issuer、audience、JWKS、授权端点、Token 端点、client ID 和 HTTPS 回调地址。仓库中的 `erp-assistant` OIDC 示例值属于兼容标识，可在后续身份迁移时更换。
+生产环境必须使用 OIDC Authorization Code + PKCE，并配置 issuer、audience、JWKS、授权端点、Token 端点、client ID 和 HTTPS 回调地址。
 
 ## RAG 配置
 
@@ -180,8 +178,6 @@ PILOT_RELEASE_FINGERPRINT=
 - `GET /api/assistant/v1/knowledge/documents/{documentId}`
 - `POST /api/assistant/v1/knowledge/documents/{documentId}/retry`
 - `POST /api/assistant/v1/knowledge/search`
-
-`/api/assistant/v1` 是当前兼容 API 前缀，后续版本化迁移时再调整，不应在本次产品重命名中直接破坏现有调用方。
 
 ## 重新索引
 
