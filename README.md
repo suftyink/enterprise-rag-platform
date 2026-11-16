@@ -253,13 +253,3 @@ docker compose --profile rag config --quiet
 - 真实评测集、阈值基线、容量和恢复目标需要按部署环境建立。
 - 可继续增加 RAG 相关能力：内容源同步、增量解析、查询改写、多阶段召回、GraphRAG、评测看板和治理工作台。
 
-## 上传到 GitHub
-
-建议创建名为 `enterprise-rag-platform` 的仓库。推送前请确认：
-
-1. `git status` 中没有 `.env`、密钥、数据库文件、日志或本地运行数据。
-2. README 中的本地地址和示例身份不被误当成生产配置。
-3. 所有质量检查通过。
-4. GitHub 仓库的默认分支、可见性和访问成员符合组织要求。
-
-本地目录仍名为 `crossborder-erp-ai-assistant` 不影响 GitHub 仓库名；如需重命名本地目录，请在停止 API、Worker、Beat 和编辑器后单独执行。
