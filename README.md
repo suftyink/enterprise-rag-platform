@@ -252,4 +252,3 @@ docker compose --profile rag config --quiet
 - 示例 Fake Embedding 只验证流程和词项检索，不代表真实语义召回率。
 - 真实评测集、阈值基线、容量和恢复目标需要按部署环境建立。
 - 可继续增加 RAG 相关能力：内容源同步、增量解析、查询改写、多阶段召回、GraphRAG、评测看板和治理工作台。
-
